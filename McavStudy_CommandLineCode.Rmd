@@ -1,0 +1,397 @@
+---
+title: "Mcav Transcriptome Assembly"
+author: "Kelsey Beavers"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+## FastP: Data Preprocessing
+Each pair of forward and reverse reads is first put through a pre-processing step where adapters are trimmed and quality filtering is performed. This program used is called [FastP](https://github.com/OpenGene/fastp). This program was developed as an all-in-one pre-processing program for FastQ files with multi-threading support for high performance. 
+
+First install latest version in TACC frontera /scratch directory:
+Mine is v0.23.2
+```{linux, eval=FALSE}
+wget http://opengene.org/fastp/fastp
+chmod a+x ./fastp
+```
+
+The code in file fastp.sh is as follows: 
+```{linux, eval=FALSE}
+#!/bin/bash
+#SBATCH -J fastp           # Job name
+#SBATCH -o fastp.o%j       # Name of stdout output file
+#SBATCH -e fastp.e%j       # Name of stderr error file
+#SBATCH -p normal          # Queue (partition) name
+#SBATCH -N 4               # Total # of nodes (must be 1 for serial)
+#SBATCH -n 32              # Total # of mpi tasks (should be 1 for serial)
+#SBATCH -t 24:00:00        # Run time (hh:mm:ss)
+
+PATH=$PATH:/scratch1/06825/tg861249/fastp
+for FILE in *_1.fq.gz; do
+	echo ${FILE}
+	SAMP=$(basename -s _1.fq.gz $FILE)
+	echo $SAMP
+/scratch1/06825/tg861249/fastp -i ${SAMP}_1.fq.gz -I ${SAMP}_2.fq.gz -o /scratch1/06825/tg861249/SCTLD/field/NEW/fastp/${SAMP}_fp_1.fq.gz -O /scratch1/06825/tg861249/SCTLD/field/NEW/fastp/${SAMP}_fp_2.fq.gz -c -x -h ${SAMP}fastp.html
+done
+```
+
+
+## M. cavernosa Transcriptome Assembly
+### Step 1: De novo Metatranscriptome assembly
+Six samples are selected and their FastP adapter-trimmed and quality-filtered reads are used to generate a de novo reference transcriptome using [Trinity](https://github.com/trinityrnaseq/trinityrnaseq/wiki). This job was run on the Frontera supercomputer at the Texas Advanced Computing Center (TACC). 
+
+First download the most recent version of Trinity singularity into your /scratch directory:
+Mine is v2.14.0
+```{linux, eval=FALSE}
+wget https://data.broadinstitute.org/Trinity/TRINITY_SINGULARITY/trinityrnaseq.v2.14.0.simg
+```
+The code in mcav_denovo_trinity.sh is as follows:
+```{linux, eval=FALSE}
+#!/bin/bash
+#SBATCH -J mcav_denovo_trinity            # job name
+#SBATCH -o mcav_denovo_trinity.o%j        # output and error file name (%j expands to jobID)
+#SBATCH -e mcav_denovo_trinity.e%j        # name of stderr error file. 
+#SBATCH -N 1                       			  # number of nodes requested
+#SBATCH -n 32                      			  # total number of mpi tasks requested
+#SBATCH -p nvdimm                  			  # queue (partition) -- normal, development, etc.
+#SBATCH -t 48:00:00                			  # run time (hh:mm:ss) - 48 hours
+
+module load tacc-singularity
+
+PATH=$PATH:/scratch1/06825/tg861249
+
+singularity exec -e /scratch1/06825/tg861249/trinityrnaseq.v2.14.0.simg Trinity --normalize_reads --seqType fq --grid_node_CPU 21 --grid_node_max_memory 200G --max_memory 200G --SS_lib_type FR --left M_155_fp_1.fq.gz,M_245_fp_1.fq.gz,M_293_fp_1.fq.gz,M_303_fp_1.fq.gz,M_310_fp_1.fq.gz,M_312_fp_1.fq.gz --right M_155_fp_2.fq.gz,M_245_fp_2.fq.gz,M_293_fp_2.fq.gz,M_303_fp_2.fq.gz,M_310_fp_2.fq.gz,M_312_fp_2.fq.gz --CPU 21
+```
+
+### Step 2: Obtain coral-only transcripts
+
+Coral-only transcripts are extracted from the de novo metatranscriptome following the protocol outlined by Dimos et al. (2022). The longest isoform sequence is obtained using the script in [Trinity](https://github.com/trinityrnaseq/trinityrnaseq/wiki). Usage is as follows:
+```{bash, eval=FALSE}
+SERVER=coralimmunity
+DIR=/opt/storage/storage/SCTLD/field/UPDATED/filtered_denovo_trinity
+
+nohup /opt/storage/opt_programs/trinityrnaseq-Trinity-v2.5.1/util/misc/get_longest_isoform_seq_per_trinity_gene.pl ./../denovo_trinity/trinity_out_dir.Trinity.fasta > mcav_longest_isoform.fasta
+# Resulting transcriptome contains 506,142 transcripts
+```
+
+A Master Coral database is created using [BLAST](https://www.ncbi.nlm.nih.gov/books/NBK279690/toc/?report=reader):
+```{linux, eval=FALSE}
+/opt/storage/opt_programs/ncbi-blast-2.2.27+/bin/makeblastdb -in ./../../../coralmaster/MasterCoral.fasta -parse_seqids -dbtype nucl -out MasterCoral_db
+```
+
+The assembly is BLASTed against the Master Coral database:
+```{linux, eval=FALSE}
+/opt/storage/opt_programs/ncbi-blast-2.2.27+/bin/blastn -query mcav_longest_isoform.fa -db MasterCoral_db -outfmt "6 qseqid evalue pident length" -max_target_seqs 1 -out mcav_coral_only_sequences.txt
+
+# Resulting transcriptome contains 331,714 transcripts
+```
+
+Reads with less than 95% percent identity and shorter than 150 bp long are filtered out:
+```{linux, eval=FALSE}
+awk '{if ($3 > 95) print $1,$2,$4 }' mcav_coral_only_sequences.txt > contigs_percent_95.txt
+# Resulting transcriptome contains 272,048 transcripts
+
+awk '{if ($3 > 150) print $1}' contigs_percent_95.txt > contigs_percent_95_bp_150.txt
+# Resulting transcriptome contains 239,079 transcripts
+```
+
+### Step 3: Extract coral-only transcripts from assembly
+An index of the metatranscriptome assembly is created with [cdbfasta](https://github.com/gpertea/cdbfasta):
+```{bash, eval=FALSE}
+Server=coralimmunity
+DIR=/opt/storage/storage/SCTLD/field/UPDATED/filtered_denovo_trinity
+
+nohup /opt/storage/opt_programs/cdbfasta/cdbfasta ./../denovo_trinity/trinity_out_dir.Trinity.fasta
+
+mv ./../denovo_trinity/trinity_out_dir.Trinity.fasta.cidx .
+```
+
+Coral-only contigs (contigs_percent_95_bp_150.txt) are matched to the metatranscriptome index
+```{linux, eval=FALSE}
+cat contigs_percent_95_bp_150.txt | /opt/storage/opt_programs/cdbfasta/cdbyank trinity_out_dir.Trinity.fasta.cidx > mcav_coral_only_transcriptome.fasta
+```
+
+Extract the longest open reading frame from each contig and then generate its predicted peptide sequence using [TransDecoder](https://github.com/TransDecoder/TransDecoder/wiki):
+```{linux, eval=FALSE}
+nohup /opt/storage/opt_programs/TransDecoder-TransDecoder-v5.5.0/TransDecoder.LongOrfs -t mcav_coral_only_transcriptome.fasta
+
+nohup /opt/storage/opt_programs/TransDecoder-TransDecoder-v5.5.0/TransDecoder.Predict -t mcav_coral_only_transcriptome.fasta
+
+# Rename the resulting .pep file to end in .fa
+cp mcav_coral_only_transcriptome.fasta.transdecoder.pep mcav_coral_only_transcriptome.fasta.transdecoder.fa
+```
+
+Similar sequences are removed with [cd-hit](https://sites.google.com/view/cd-hit)
+```{linux, eval=FALSE}
+nohup /home/kmb8566/miniconda2/bin/cd-hit -i mcav_coral_only_transcriptome_transdecoder.fa -o mcav_reference_proteome.fa
+# This reference proteome is now ready for STRING
+# 76,892 transcripts
+```
+
+### Step 4: Make an alignable transcriptome
+Use the reference proteome to create an alignable transcriptome:
+```{linux, eval=FALSE}
+grep ">" mcav_reference_proteome.fa > mcav_proteome_names.txt
+sed 's/.p/\t/' mcav_proteome_names.txt > proteome_names_format.txt
+awk '{print $1}'  proteome_names_format.txt > contigs_to_extract.txt
+sed 's/^.//g' contigs_to_extract.txt > contigs_list.txt
+
+cat contigs_list.txt | /opt/storage/opt_programs/cdbfasta/cdbyank mcav_denovo.fasta.cidx > final_mcav_reference_transcriptome.fa
+# 73,047 transcripts
+```
+
+### Step 5: Assembly metrics
+Assess the quality of the new transcriptome
+```{linux}
+nohup /opt/storage/opt_programs/anaconda3/bin/python3.6 /opt/storage/opt_programs/busco-master/scripts/run_BUSCO.py -i final_mcav_reference_transcriptome.fa -o final_mcav_reference_transcriptome_busco_results -l /opt/storage/opt_programs/busco-master/metazoa_odb10 -m tran
+```
+
+Obtain N50 score for new transcriptome
+```{linux}
+nohup /opt/storage/opt_programs/bbmap/bbstats.sh in=final_mcav_reference_transcriptome_busco_results > final_mcav_reference_transcriptome_bbstats.txt
+
+# Main genome scaffold total:             73047
+# Main genome scaffold N/L50:             16467/2.208 KB
+```
+
+### Step 6: Annotate the coral-only transcriptome
+Download the latest [UniProt](https://www.uniprot.org/help/downloads) release (Reviewed).
+```{bash, eval=FALSE}
+Server=coralimmunity
+DIR=/opt/storage/storage/SCTLD/field/UPDATED/blastdb_12.19.22
+
+# Downloaded on 12.20.22
+wget https://ftp.uniprot.org/pub/databases/uniprot/current_release/knowledgebase/complete/uniprot_sprot.fasta.gz
+gunzip uniprot_sprot.fasta.gz
+```
+
+Download the latest [NCBI-BLAST](https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/LATEST/) release
+```{bash}
+Server=coralimmunity
+DIR=/opt/storage/opt_programs
+
+wget https://ftp.ncbi.nlm.nih.gov/blast/executables/blast+/2.13.0/ncbi-blast-2.13.0+-x64-linux.tar.gz
+tar xvfz ncbi-blast-2.13.0+-x64-linux.tar.gz
+```
+
+Create the BLAST database out of this Uniprot download:
+```{bash}
+Server=coralimmunity
+DIR=/opt/storage/storage/SCTLD/field/UPDATED/blastdb_12.19.22
+
+/opt/storage/opt_programs/ncbi-blast-2.13.0+/bin/makeblastdb -in uniprot_sprot.fasta -parse_seqids -dbtype prot -out uniprot_db
+```
+
+BLAST the assembly against the uniprot database:
+```{bash}
+nohup /opt/storage/opt_programs/ncbi-blast-2.13.0+/bin/blastx -query final_mcav_reference_transcriptome.fa -db ./../blastdb_12.19.22/uniprot_db -outfmt "6 sseqid qseqid evalue" -max_target_seqs 1 -out annotated_final_mcav_reference_transcriptome.txt
+```
+
+## BBSplit: Sort coral and Symbiodiniaceae reads
+Our eukaryotic reads contain sequences that originate from both the coral host species as well as their intracellular Symbiodiniaceae. There are four predominant Symbiodiniaceae genera that form symbioses with the corals in our study, so we will use [BBMap](https://jgi.doe.gov/data-and-tools/bbtools/bb-tools-user-guide/bbmap-guide/) to map reads to the coral host transcriptome, as well as Symbiodinium, Breviolum, Cladocopium, and Durusdinium transcriptomes, prior to read quantification. BBMap is splice-aware global aligner for DNA and RNA sequencing reads, and BBsplit uses BBMap to map reads to multiple transcriptomes at once and determines which transcriptome each reads matches to best. Usage is as follows:
+
+```{bash, eval=FALSE}
+Server=coralimmunity
+DIR=/opt/storage/storage/SCTLD/field/UPDATED/BBSplit/
+# Make sure all of your reference transcriptomes are in this directory
+# cp all fastp filtered .fq.gz files into this directory (we will delete these copies later)
+```
+
+BBSplit.sh:
+```{bash}
+#!/bin/bash
+PATH=$PATH:/opt/storage/opt_programs/bbmap
+
+for FILE in *_fp_1.fq.gz; do
+        echo ${FILE}
+        SAMP=$(basename -s _fp_1.fq.gz $FILE)
+        echo $SAMP
+        
+java -ea -Xmx10g -cp /opt/storage/opt_programs/bbmap/current/ align2.BBSplitter in1=${SAMP}_fp_1.fq.gz in2=${SAMP}_fp_2.fq.gz ref=final_mcav_reference_transcriptome.fa,SymbA_transcriptome.fa,SymbB_transcriptome.fa,SymbC_transcriptome.fa,SymbD_transcriptome.fa basename=${SAMP}_%.fq.gz refstats=${SAMP}_stats.txt outu1=${SAMP}_fp_1.fq.gz outu2=${SAMP}_fp_2.fq.gz
+done
+```
+
+Run the script with:
+```{bash}
+nohup bash BBSplit.sh
+```
+
+The stats.txt file for each sample will be used to determine the dominant Symbiodiniaceae genus within each sample (using the %unambiguousReads column).
+
+Make separate directories for each output (reads_host,reads_SymbA,reads_SymbB,reads_SymbC,reads_SymbD,reads_unmatched) and move .fq.gz output files into their appropriate files. You can now delete your temporary fp files from this directory.
+
+The steps the follow should be completed on the coral reads as well as the dominant symbiont reads.
+
+### Reformat Reads
+From here, each file will need to be reformatted with BBMap program to split back into two separate fastq files for forward and reverse reads. The script for the host reads is as follows:
+```{bash, eval=FALSE}
+#!/bin/bash
+
+PATH=$PATH:/opt/storage/opt_programs/bbmap/
+for FILE in *.fq.gz; do
+        echo ${FILE}
+        SAMP=$(basename -s .fq.gz $FILE)
+        echo $SAMP
+java -ea -Xmx10g -cp /opt/storage/opt_programs/bbmap/current/ jgi.ReformatReads in=${SAMP}.fq out1=${SAMP}_1.fq out2=${SAMP}_2.fq
+done
+```
+
+Run the script with:
+```{bash}
+nohup bash ReformatReads.sh
+```
+
+## Cladocopium Assembly
+### Step 1: De novo microbiome assembly
+Reference transcriptome for C. goreaui was previously assembled and published by Davies et al. (2018). 
+To create a predicted proteome from the assembly, perform the following:
+
+Extract the longest open reading frame from each contig and then generate its predicted peptide sequence using [TransDecoder](https://github.com/TransDecoder/TransDecoder/wiki):
+```{linux, eval=FALSE}
+nohup /opt/storage/opt_programs/TransDecoder-TransDecoder-v5.5.0/TransDecoder.LongOrfs -t SymbC_transcriptome.fa
+
+nohup /opt/storage/opt_programs/TransDecoder-TransDecoder-v5.5.0/TransDecoder.Predict -t SymbC_transcriptome.fa
+
+# count the number of transcripts 
+grep -c ">" SymbC_transcriptome.fa.transdecoder.pep
+# 69,783
+```
+
+Similar sequences are removed with [cd-hit](https://sites.google.com/view/cd-hit)
+```{linux, eval=FALSE}
+nohup /home/kmb8566/miniconda2/bin/cd-hit -i SymbC_transcriptome.fa.transdecoder.fa -o SymbC_proteome_cdhit.fa
+# Resulting file is ready for upload to STRING
+
+# count the number of transcripts in the predicted proteome
+grep -c ">" SymbC_proteome_cdhit.fa
+# 48,656
+```
+
+### Step 2: Make an alignable transcriptome
+Use the reference proteome to create an alignable transcriptome:
+```{linux, eval=FALSE}
+grep ">" SymbC_proteome_cdhit.fa > SymbC_proteome_names.txt
+sed 's/[.].*//' SymbC_proteome_names.txt > SymbC_proteome_names_format.txt
+awk '{print $1}'  SymbC_proteome_names_format.txt > contigs_to_extract.txt
+sed 's/^.//g' contigs_to_extract.txt > contigs_list.txt
+
+/opt/storage/opt_programs/cdbfasta/cdbfasta SymbC_transcriptome.fa
+
+cat contigs_list.txt | /opt/storage/opt_programs/cdbfasta/cdbyank SymbC_transcriptome.fa.cidx > final_SymbC_transcriptome.fa
+# 48,013
+```
+
+### Step 3: Assembly metrics
+Assess the completeness of the new transcriptome
+```{linux}
+nohup /opt/storage/opt_programs/anaconda3/bin/python3.6 /opt/storage/opt_programs/busco-master/scripts/run_BUSCO.py -i final_SymbC_transcriptome.fa -o final_SymbC_busco_results -l /opt/storage/opt_programs/busco-master/eukaryota_odb10 -m tran
+
+# C:69.0%[S:52.9%,D:16.1%],F:7.1%,M:23.9%,n:255
+```
+
+Obtain N50 score for new transcriptome
+```{linux}
+nohup /opt/storage/opt_programs/bbmap/bbstats.sh in=final_SymbC_transcriptome.fa > final_SymbC_bbstats.txt
+
+# Main genome scaffold total:             48013
+# Main genome scaffold N/L50:             13469/1.636 KB
+```
+
+### Step 4: Annotate the C. goreaui transcriptome
+
+BLAST the assembly against the uniprot database:
+```{bash}
+nohup /opt/storage/opt_programs/ncbi-blast-2.13.0+/bin/blastx -query final_SymbC_transcriptome.fa -db /opt/storage/storage/SCTLD/field/UPDATED/blastdb_12.19.22/uniprot_db -outfmt "6 sseqid qseqid evalue" -max_target_seqs 1 -out annotated_final_SymbC_transcriptome.txt
+```
+
+## Salmon: Read Quantification
+[Salmon](https://salmon.readthedocs.io/en/latest/salmon.html#) is a tool built for transcript quantification. It uses two phases; indexing and quantification, to map samples. The first step, indexing, is independent of the reads and requires a reference transcript to build an index. 
+
+### Index Building 
+
+#### Host
+
+Build the index for the M. cavernosa de novo transcriptome
+```{bash, eval=FALSE}
+# For the host index, we can keep kmer values at a standard as we are confident in the transcriptomes we have just built and the quality of the transcriptome. 
+Server=coralimmunity
+DIR=/opt/storage/storage/SCTLD/field/UPDATED/salmon/Mcav
+
+# First mv all reformatted mcav files into this directory:
+mv ./../../BBSplit/reads_host/*.fq .
+
+# Then copy reference transcriptome into this directory:
+cp ./../../BBSplit/final_mcav_reference_transcriptome.fa .
+
+# Build Mcav index
+nohup /opt/storage/opt_programs/salmon-1.9.0_linux_x86_64/bin/salmon index -t final_mcav_reference_transcriptome.fa -i mcav_index
+```
+
+#### Symbiont
+
+Build the index for the Cladocopium de novo transcriptome
+```{bash, eval=FALSE}
+# For the symbiont index, we drop kmer values at a standard in order to get the best quality of reads (23). 
+Server=coralimmunity
+DIR=/opt/storage/storage/SCTLD/field/UPDATED/salmon/SymbC
+
+#First mv all reformatted SymbC files into this directory:
+mv ./../../BBSplit/reads_SymbC/*.fq .
+
+#Then copy reference transcriptome into this directory:
+cp /opt/storage/storage/SCTLD/proteomes/final_SymbC_transcriptome.fa . 
+
+#Build Cladocopium index
+nohup /opt/storage/opt_programs/salmon-1.9.0_linux_x86_64/bin/salmon index -t final_SymbC_transcriptome.fa -i SymbC_index -k 23
+```
+
+### Mapping Reads: Use Salmon for quasi-mapping results 
+[Salmon](https://salmon.readthedocs.io/en/latest/salmon.html#) is a tool built for transcript quantification. It uses two phases; indexing and quantification, to map samples. The second phase: quantification, using quasi-mapping program to map samples to index. Quasi-mapping assumes a generally small file and increased number of repeats in reference sequences. It also takes into account splicing because a transcriptome is assumed to be used for the index. 
+#### Host
+
+mcavSalmon.sh file: 
+```{linux, eval=FALSE}
+#!/bin/bash
+
+PATH=$PATH:/opt/storage/opt_programs/salmon/salmon-latest_linux_x86_64/bin/
+for FILE in *_1.fq; do
+        echo ${FILE}
+        SAMP=$(basename -s _1.fq $FILE)
+        echo $SAMP
+
+/opt/storage/opt_programs/salmon-1.9.0_linux_x86_64/bin/salmon quant -i mcav_index -l A \
+				-1 ${SAMP}_1.fq \
+				-2 ${SAMP}_2.fq \
+				-p 4 --validateMappings -o quants/${SAMP}_quant
+done
+```
+
+Run the job with:
+```{bash}
+nohup bash mcavSalmon.sh
+```
+
+#### Symbiont
+
+SymbCSalmon.sh
+```{linux,eval=FALSE}
+#!/bin/bash
+
+PATH=$PATH:/opt/storage/opt_programs/salmon-1.9.0_linux_x86_64/bin/
+for FILE in *_1.fq; do
+        echo ${FILE}
+        SAMP=$(basename -s _1.fq $FILE)
+        echo $SAMP
+
+/opt/storage/opt_programs/salmon-1.9.0_linux_x86_64/bin/salmon quant -i SymbC_index -l A \
+                                -1 ${SAMP}_1.fq \
+                                -2 ${SAMP}_2.fq \
+                                -p 4 --validateMappings -o quants/${SAMP}_quant
+done
+```
+
+Run the job with:
+```{bash}
+nohup bash SymbCSalmon.sh
+```
+
