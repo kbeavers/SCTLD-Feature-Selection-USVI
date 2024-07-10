@@ -1,0 +1,2796 @@
+---
+title: "SCTLD Field Study -- Host Analysis"
+author: "Kelsey Beavers"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+#knitr::opts_chunk$set(echo = TRUE)
+#if (!require("BiocManager",quietly = TRUE))
+#  install.packages("BiocManager")
+#BiocManager::install("tidyr")
+#BiocManager::install("sigFeature",force=TRUE)
+#BiocManager::install("tximport")
+#BiocManager::install("DESeq2")
+#BiocManager::install("PCAtools")
+#BiocManager::install("ggvenn")
+#BiocManager::install("ggplot2")
+#BiocManager::install("ggpubr")
+#BiocManager::install("PCAtools")
+
+library(tidyr)
+library(tximport)
+library(DESeq2)
+library(plyr)
+library(dplyr)
+library(ggplot2)
+library(ggvenn)
+library(ggpubr)
+library(PCAtools)
+library(pheatmap)
+library(sigFeature)
+library(e1071)
+library(stringr)
+```
+
+# HOST ANALYSIS
+## Create annotation file
+
+Read in the blast annotation of the final_mcav_reference_transcriptome.fa. We need to format it to be compatible with our analysis.
+```{r}
+mcav_annot <- read.table("~/Documents/Dissertation/Mcav_Field/host/salmon/annotated_final_mcav_reference_transcriptome.txt")
+head(mcav_annot)
+
+# Isolate Entry ID by removing extraneous information
+colnames(mcav_annot) <- c("EntryInfo","Transcript","Evalue")
+mcav_annot <- separate(data = mcav_annot, col = EntryInfo, into = c("sp","Entry","Entry_org"), sep = "\\|")
+head(mcav_annot)
+mcav_annot <- mcav_annot[,c(2,4,5)]
+head(mcav_annot)
+
+# Make your tx2gene file
+## Filter out transcripts with annotation evalue < 0.000001
+mcav_annot_goodEval <- mcav_annot %>% filter(Evalue < 0.000001) # 1e-06
+dim(mcav_annot_goodEval)
+# 33,614 transcripts with good evalue
+
+## format into 2 columns: 1st is transcript, 2nd is Entry
+mcav_tx2gene <- mcav_annot_goodEval[,c(2,1)]
+head(mcav_tx2gene)
+dim(mcav_tx2gene)
+write.csv(mcav_tx2gene, file="~/Documents/Dissertation/Mcav_Field/host/salmon/mcav_tx2gene.csv", row.names = FALSE)
+```
+
+## Tximport
+
+First prepare your files to be input into RStudio. You'll need to make a directory on your computer to store the transcriptome annotation as well as the Salmon quant directories (e.g. M_148_final_mcav_reference_transcriptome_quant). You will also need to make the following file:
+  1. "mcav_samples.txt" - one-column file where the first cell = "sample" and the next cells are the names of your Salmon quant directories. Since we have 22 samples there should be 23 rows including the "sample" row
+  2. "mcav_tx2tx.csv" (optional) - if you would like to include unannotated genes, use this file instead of "mcav_tx2gene.csv" below. 
+
+Read in the raw counts from Salmon for all samples
+```{r}
+setwd("~/Documents/Dissertation/Mcav_Field/host/salmon/")
+mcav_samples <- read.table("mcav_samples.csv",header=TRUE)
+mcav_samples
+mcav_files <- file.path(mcav_samples$sample, "quant.sf")
+names(mcav_files) <- paste0("sample", 1:22)
+all(file.exists(mcav_files))
+# Should return '[1] TRUE'
+mcav_transcripts <- read.csv("mcav_tx2gene.csv")
+dim(mcav_transcripts) # 33,790
+mcav_txi <- tximport(mcav_files, type = 'salmon', tx2gene = mcav_transcripts)
+names(mcav_txi)
+tail(mcav_txi$counts)
+dim(mcav_txi$counts)
+# 19,039 transcripts with count data and evalue < 1.0e-06 
+
+# Format counts file and add column names
+mcav_counts <- mcav_txi$counts
+colnames(mcav_counts)
+mcav_counts <- as.data.frame(mcav_counts)
+colnames(mcav_counts) <- c("mcav_148","mcav_149","mcav_152","mcav_153","mcav_155","mcav_156","mcav_244","mcav_245","mcav_265","mcav_291","mcav_292","mcav_293","mcav_294","mcav_297","mcav_299","mcav_301","mcav_302","mcav_303","mcav_304","mcav_305","mcav_310","mcav_312")
+
+# Convert gene counts to integers
+mcav_counts <- tibble::rownames_to_column(mcav_counts, "Entry")
+mcav_counts[2:23] <- round(mcav_counts[2:23], digits=0)
+mcav_counts <- as.data.frame(mcav_counts)
+write.csv(mcav_counts, file="~/Documents/Dissertation/Mcav_Field/host/DESeq2/mcav_counts.csv",quote = FALSE, row.names = FALSE)
+```
+
+
+## DESeq2
+
+Create gene expression matrix
+```{r}
+countData <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/mcav_counts.csv",row.names = "Entry")
+colnames(countData)
+colData <- read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv", row.names = "Sample")
+rownames(colData)
+colnames(countData)
+# rownames(colData) and colnames(countData) must match
+
+# Convert colData columns to factors
+colData <- as.data.frame(colData)
+colData$Site <- as.factor(colData$Site)
+colData$Colony_status <- as.factor(colData$Colony_status)
+colData$Frag_Condition <- as.factor(colData$Frag_Condition)
+colData$Individual <- as.factor(colData$Individual)
+
+# Set the design. This design will test for the differences in expression caused by tissue condition while controlling for batch (site) effects
+dds <- DESeqDataSetFromMatrix(countData = countData,
+                              colData = colData,
+                              design = ~Site + Frag_Condition)
+# Filter out rows with average expression < 10
+dds <- dds[rowMeans(counts(dds)) > 10, ]
+test <- DESeq(dds)
+```
+Find Log2FoldChange (LFC) differences in expression between HH and HD samples
+```{r}
+res_HH_vs_HD <- results(test, contrast = c("Frag_Condition","HD","HH"))
+resordered_HH_vs_HD <- as.data.frame(res_HH_vs_HD[order(res_HH_vs_HD$padj),])
+resordered_HH_vs_HD <- tibble::rownames_to_column(resordered_HH_vs_HD, "Entry")
+write.csv(resordered_HH_vs_HD,file = "~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_HD.csv", row.names = FALSE)
+```
+
+Find Log2FoldChange (LFC) differences in expression between HH and LD samples
+```{r}
+res_HH_vs_LD <- results(test, contrast = c("Frag_Condition","LD","HH"))
+resordered_HH_vs_LD <- as.data.frame(res_HH_vs_LD[order(res_HH_vs_LD$padj),])
+resordered_HH_vs_LD <- tibble::rownames_to_column(resordered_HH_vs_LD, "Entry")
+write.csv(resordered_HH_vs_LD,file = "~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_LD.csv", row.names = FALSE)
+```
+
+Find Log2FoldChange (LFC) differences in expression between HD and LD samples
+```{r}
+res_HD_vs_LD <- results(test, contrast = c("Frag_Condition","LD","HD"))
+resordered_HD_vs_LD <- as.data.frame(res_HD_vs_LD[order(res_HD_vs_LD$padj),])
+resordered_HD_vs_LD <- tibble::rownames_to_column(resordered_HD_vs_LD, "Entry")
+write.csv(resordered_HD_vs_LD,file = "~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv", row.names = FALSE)
+```
+
+Create regularized log (rlog) expression matrix
+```{r}
+rld <- rlog(dds, blind = FALSE)
+rrld <- as.data.frame(assay(rld))
+rrld <- tibble::rownames_to_column(rrld,"Entry")
+dim(rrld)
+# 17,229 transcripts with measurable expression levels
+write.csv(rrld, file = "~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv", row.names = FALSE)
+```
+
+### DEGs
+Find and enumerate significant DEGs (padj < 0.05)
+
+#### HH vs HD
+```{r}
+# Healthy on Healthy Colony (HH) vs Healthy on Diseased Colony (HD)
+HH_vs_HD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_HD.csv")
+HH_vs_HD_DEGs <- HH_vs_HD %>% filter(padj < 0.05)
+dim(HH_vs_HD_DEGs)
+# 13 DEGs
+head(HH_vs_HD_DEGs)
+```
+
+#### HH vs LD
+```{r}
+# Healthy on Healthy Colony (HH) vs Lesion on Diseased Colony (LD)
+HH_vs_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_LD.csv")
+HH_vs_LD_DEGs <- HH_vs_LD %>% filter(padj < 0.05)
+dim(HH_vs_LD_DEGs)
+# 2560 DEGs
+head(HH_vs_LD_DEGs)
+```
+
+#### HD vs LD
+```{r}
+# Healthy on Diseased Colony (HD) vs Lesion on Diseased Colony (LD)
+HD_vs_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
+HD_vs_LD_DEGs <- HD_vs_LD %>% filter(padj < 0.05)
+dim(HD_vs_LD_DEGs)
+# 6089 DEGs
+head(HD_vs_LD_DEGs)
+```
+
+### Venn Diagrams
+Visualize DEGs shared or unique across disease states.
+
+All DEGs:
+```{r, fig.height=1.8, fig.width=1.8}
+# Venn Diagram of all DEGs
+x <- list(
+  HH_vs_HD = HH_vs_HD_DEGs$Entry,
+  HH_vs_LD = HH_vs_LD_DEGs$Entry,
+  HD_vs_LD = HD_vs_LD_DEGs$Entry
+)
+
+all_venn <- 
+ggvenn(
+  x, fill_color = c("#ffb2e6","#ec92f3","#d972ff"),
+  show_percentage = FALSE, stroke_size = 0.3, 
+  set_name_size = 2.4, text_size = 2
+  )
+```
+
+Upregulated DEGs:
+```{r, fig.height=1.8, fig.width=1.8}
+# Venn Diagram of upregulated DEGs
+HH_vs_HD_up <- HH_vs_HD_DEGs %>% filter(log2FoldChange > 0)
+HH_vs_LD_up <- HH_vs_LD_DEGs %>% filter(log2FoldChange > 0)
+HD_vs_LD_up <- HD_vs_LD_DEGs %>% filter(log2FoldChange > 0)
+
+x_up <- list(
+  HH_vs_HD_up = HH_vs_HD_up$Entry,
+  HH_vs_LD_up = HH_vs_LD_up$Entry,
+  HD_vs_LD_up = HD_vs_LD_up$Entry
+)
+
+up_venn <- 
+ggvenn(
+  x_up, fill_color = c("#ffaf87","#ff8e72","#ed6a5e"),
+  show_percentage = FALSE, stroke_size = 0.3, 
+  set_name_size = 2.4, text_size = 2
+  )
+```
+
+Downregulated DEGs:
+```{r, fig.height=1.8, fig.width=1.8}
+# Venn Diagram of downregulated DEGs
+HH_vs_HD_down <- HH_vs_HD_DEGs %>% filter(log2FoldChange < 0)
+HH_vs_LD_down <- HH_vs_LD_DEGs %>% filter(log2FoldChange < 0)
+HD_vs_LD_down <- HD_vs_LD_DEGs %>% filter(log2FoldChange < 0)
+
+x_down <- list(
+  HH_vs_HD_down = HH_vs_HD_down$Entry,
+  HH_vs_LD_down = HH_vs_LD_down$Entry,
+  HD_vs_LD_down = HD_vs_LD_down$Entry
+)
+
+down_venn <- 
+ggvenn(
+  x_down, fill_color = c("#d9f0ff","#a3d5ff","#83c9f4"),
+  show_percentage = FALSE, stroke_size = 0.3, 
+  set_name_size = 2.4, text_size = 2
+  )
+```
+
+Combined plot
+```{r}
+ggarrange(all_venn, up_venn, down_venn, ncol = 3)
+```
+
+### PCA
+
+All genes, separated by disease status
+```{r}
+# Remove all columns except for "Entry ID" and the counts
+countData <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv", row.names = "Entry")
+colnames(countData)
+Gene_expression <- as.matrix(countData)
+Metadata <- as.data.frame(read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv", header = TRUE, row.names = "Sample"))
+rownames(Metadata)
+colnames(Gene_expression)
+# rownames(Metadata) and colnames(Gene_expression) must match
+
+# Create the PCA
+p <- PCAtools::pca(Gene_expression, metadata=Metadata, center = TRUE, removeVar = 0.0)
+```
+
+Plot a screeplot
+```{r}
+screeplot(p)
+```
+
+Plot a PCA of the first two principal components using all of the gene expression data colored by frag condition:
+```{r, fig.height=4.5, fig.width=6}
+condition_pca <- 
+biplot(p,
+       lab=NULL,
+       colby = "Frag_Condition", colkey = c('HH'='springgreen2','LD'='red','HD'='steelblue1'),
+       colLegendTitle ='Condition',
+       ellipse = TRUE,
+       xlim = c(-120,160), ylim = c(-70, 80),
+       title = "All Gene Expression PCA",
+       legendPosition = 'right')
+```
+
+Plot a PCA of the first two principal components using all of the gene expression data colored by site:
+```{r, fig.height=4.5, fig.width=6}
+site_pca <- 
+biplot(p,
+       lab = NULL,
+       colby = "Site",
+       colLegendTitle = "Site",
+       ellipse = TRUE,
+       xlim=c(-130,120), ylim = c(-70,100),
+       title = "All Gene Expression PCA",
+       legendPosition = 'right')
+```
+
+Combined PCA figure
+```{r, fig.height=5, fig.width=11}
+pdf(file = "~/Documents/Dissertation/Mcav_Field/RESUBMISSION/Figures/Supp_fig1_PCAs.pdf",height = 5, width = 11)
+ggarrange(condition_pca, site_pca,
+          ncol = 2, widths = c(1,1.05))
+dev.off()
+```
+
+## SigFeature - Feature Selection
+### HH
+
+The variable 'X' contains the gene expression data, and 'Y' contains the sample labels. 'X' is a two-dimensional matrix in which the row contains the sample names, and the column contains the gene/feature names. The variable 'Y' contains the sample labels as -1 and 1. 
+```{r}
+# Use expression data as the X matrix
+expression_data <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv", row.names = "Entry")
+X <- as.data.frame(t(expression_data))
+dim(X)
+# 22 17229
+
+# Use the class data (fragment condition) as the Y matrix
+# For this run we will do HH vs everything else, so adjust the "Frag_Condition" column where HH = 1 and everything else = -1
+metadata <- as.data.frame(read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv"))
+metadata <- metadata %>%
+  mutate(Frag_Condition = ifelse(Frag_Condition == "HH", 1, -1))
+
+Y <- metadata$Frag_Condition
+names(Y) <- metadata$Sample
+Y
+```
+
+The idea of Significant Feature Selection (sigFeature): The recursive feature elimination that uses support vector machines can rank better classifiers, but those classifiers may or may not be differentially significant between the classes. Features with notable classification accuracy and also differentially significant between the classes have a predominant role in a biological aspect. The algorithm here is very efficient in ranking classifiers, as well as in determining differentially significant classes among them. 
+
+The primary objective of this algorithm is to enumerate the ranking weights for all features and sort the features according to weight vectors as the classification basis. The coefficient and the expression mean difference between two compared groups of each individual feature is used to calculate the weight value of that particular gene or the feature. The iteration processes is followed by backward removal of the feature. The iteration processes is continued until there is only one feature remaining in the dataset. The smallest ranking weight will be removed by the algorithm and stored in a stack, while the remaining feature variables have a significant impact for producing weight. Finally, the feature variables which are stored in the stack will be listed in the descending order of descriptive different degree. 
+
+```{r}
+system.time(sigfeatureRankedList <- sigFeature(X,Y))
+#     user    system   elapsed 
+# 2335.959   129.003  2852.795  
+
+save(X, Y, expression_data, metadata, sigfeatureRankedList, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigFeatureRankedList_HH.RData")
+```
+
+The variable "sigfeatureRankedList" will return the address of the genes/features after execution. To visualize the output, print the address of top 10 ranked genes/features. 
+```{r}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigFeatureRankedList_HH.RData")
+print(sigfeatureRankedList[1:10])
+# [1] 12427 13320  2089 12872 12418  3593  3895 10483  4180  5150
+
+# Identify the Entry IDs of the top 10 features using the above locations:
+expression_data <- tibble::rownames_to_column(expression_data, "Entry")
+expression_data[c(sigfeatureRankedList[1:10]),1]
+```
+
+Produce the model vector for training the dataset using the top 1000 genes/features. Linear kernel is chosen to get better performance.
+```{r}
+sigFeature.model=svm(X[ ,sigfeatureRankedList[1:1000]], Y, type = "C-classification",
+                     kernel = "linear")
+summary(sigFeature.model)
+```
+
+Show the prediction results of the same dataset that was trained before.
+```{r}
+pred <- predict(sigFeature.model, X[ ,sigfeatureRankedList[1:1000]])
+table(pred,Y)
+```
+
+The function svmrfeFeatureRanking() is included in this package to compare the performance with "sigFeature()"
+```{r}
+system.time(featureRankedList <- svmrfeFeatureRanking(X,Y))
+#     user   system  elapsed 
+# 2369.128  153.834 3586.182
+
+save(X,Y, expression_data, metadata, sigfeatureRankedList, featureRankedList, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HH/featureRankedList_HH.RData")
+```
+
+The top 10 features from svmrfe are printed below:
+```{r}
+print(featureRankedList[1:10])
+# [1] 15279 13320  6681  6609  1896  5508  9113 11237  3298  1131
+
+expression_data[c(featureRankedList[1:10]),1]
+```
+
+Produce the model vector for training the dataset using the top 1000 genes/features:
+```{r}
+RFE.model=svm(X[ ,featureRankedList[1:1000]], Y, 
+            type="C-classification", kernel="linear")
+summary(RFE.model)
+```
+
+The R script below shows the prediction result of the same dataset that was trained before.
+```{r}
+pred <- predict(RFE.model, X[ ,featureRankedList[1:1000]])
+table(pred,Y)
+```
+
+In this example section we will observe the p-value of the selected top 100 features. The function named "sigFeaturePvalue()" will calculate the p-value using t-statistic. The expression value will be taken from the dataset of the top 100 features.
+```{r, fig.width=8, fig.height=4}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/featureRankedList_HH.RData")
+pvalsigFe <- sigFeaturePvalue(X, Y, 100, sigfeatureRankedList)
+pvalRFE <- sigFeaturePvalue(X, Y, 100, featureRankedList)
+par(mfrow=c(1,2))
+hist(unlist(pvalsigFe), breaks = 50, col="skyblue", main=paste("sigFeature"), xlab = "p-value")
+hist(unlist(pvalRFE), breaks = 50, col="skyblue", main=paste("SVM-RFE"), xlab="p-value")
+```
+
+In this section a comparison of p-values produced by using the top 100 features (using "sigFeature" and "SVM-RFE" algorithms) is shown using scatter boxplots
+```{r, fig.width=6, fig.height=4}
+mytitle <- "Box Plot"
+par(mfrow=c(1,1))
+
+boxplot(unlist(pvalsigFe), unlist(pvalRFE), main=mytitle,
+        names=c("sigFeature","SVM-RFE"),
+        ylab="p-value", ylim=c(min(unlist(pvalsigFe)),
+                               max(unlist(pvalRFE))))
+stripchart(unlist(pvalsigFe), vertical = TRUE,
+           method = "jitter", add=TRUE, 
+           pch=16, col=c('green'))
+stripchart(unlist(pvalRFE), vertical = TRUE,
+           at=2, method = "jitter", add=TRUE,
+           pch=16, col=c('blue'))
+grid(nx=NULL, ny=NULL, col="black",lty="dotted")
+```
+
+For estimation of feature selection algorithms, Ambroise and McLachlan (2002) suggested external cross-validation, in which the feature selection and validation are performed on different parts of the sample set, to obtain an unbiased performance estimate. The stratified cross-validation (Brieman et al., 1984) is slightly different from regular cross-validation. In k-fold stratified cross-validation, a dataset is randomly partitioned into k equally sized folds such that the class distribution in each fold is approximately the same as that in the entire dataset. In contrast, regular cross-validation randomly partitions the dataset into k-folds without considering class distributions. Kohavi (1995) reported that stratified cross-validation has smaller bias and variance than regular cross-validation. The "sigFeature()" function thus further enhances by incorporating external cross-validation method. In this external k-fold cross validation procedure, k-1 folds are used for selecting the feature, and one fold remains untouched with will later use as a test sample set.
+```{r}
+results = sigFeature.enfold(X, Y, "kfold", 10)
+# takes about 12 hours to run
+
+str(results[1])
+
+save(X,Y,expression_data,metadata,sigfeatureRankedList,featureRankedList,pvalRFE, pvalsigFe,RFE.model,sigFeature.model, results, file="~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigfeatureEnfold_HH.RData")
+```
+
+In this section, a new function is introduced named "sigFeatureFrequency()". The main purpose of this function is to arrange the feature on the basis of its frequency. In the previous section the dataset is divided into k-folds, out of which k-1 folds are randomly taken and used for selecting the feature. This procedure is repeated k times and the frequency values are calculated for top 400 genes from the k number of lists. The "sigFeatureFrequency()" function is used here to rank further all the k'th feature lists according to its frequency.
+```{r}
+FeatureBasedonFrequency <- sigFeatureFrequency(X, results, 400, 400, pf=FALSE)
+str(FeatureBasedonFrequency)
+```
+
+In this section external cross-validation is computed and finally mean cross validation errors and the standard deviation of the errors is returned. The features, which are produced on the basis of frequnecy, are used for producing the mean cross-validation error. Training and test samples were initially split from the main sample set into k-folds. In each iteration k-1 fold are considered as training sample and remaining one fold is considered as testing sample. In this external cross-validation procedure, feature number is increased one by one. The number of miss-classification is averaged out for each fold change which finally is represented as error rate.
+```{r}
+inputdata <- data.frame(y=as.factor(Y), x=X)
+featsweepSigFe = lapply(1:400, sigCVError, FeatureBasedonFrequency, inputdata)
+# Takes multiple days to run
+
+str(featsweepSigFe[1])
+save(X,Y,expression_data,metadata,sigfeatureRankedList,featureRankedList,pvalRFE, pvalsigFe,RFE.model,sigFeature.model, results, FeatureBasedonFrequency, inputdata, featsweepSigFe, file="~/Documents/Dissertation/Mcav_Field/host/SVM/HH/featsweepSigFe_HH.RData")
+```
+
+In this section the "PlotErrors()" function draws two plots: the first plot represents the average external cross-validation error and the second plot represents the standard deviation of the miss-classification.
+```{r, fig.height=4, fig.width=6}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/featsweepSigFe_HH.RData")
+pdf(file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HH/algorithm_figures/sigFe_CV_errors_raw.pdf", height = 4, width = 6)
+PlotErrors(featsweepSigFe, 0, 0.4)
+dev.off()
+# Change colors in illustrator
+```
+
+#### Gene Lists of Results
+```{r}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/HH_featsweepSigFe.RData")
+
+# Obtain pvalues for sigFeature ranked list
+pvalsigFe <- sigFeaturePvalue(X,Y,17229,sigfeatureRankedList)
+pvalsigFe_df <- as.data.frame(pvalsigFe)
+colnames(pvalsigFe_df) <- colnames(X[,sigfeatureRankedList[1:17229]])
+pvalsigFe_df <- as.data.frame(t(pvalsigFe_df))
+colnames(pvalsigFe_df) <- "pvalue"
+pvalsigFe_df <- tibble::rownames_to_column(pvalsigFe_df, "Entry")
+
+# annotate the significant features with Uniprot information
+annot <- read.csv("~/Documents/Dissertation/Mcav_Field/uniprotkb_AND_reviewed_true_2023_08_21.csv")
+pvalsigFe_df_annot <- as.data.frame(join(pvalsigFe_df,annot,by="Entry"))
+
+# annotate the sig features with Transcript ID
+mcav_annot <- as.data.frame(read.csv("~/Documents/Dissertation/Mcav_Field/host/salmon/mcav_tx2gene.csv"))
+require(data.table)
+setDT(mcav_annot); setDT(pvalsigFe_df_annot)
+pvalsigFe_df_annot_transcript <- mcav_annot[pvalsigFe_df_annot, mult = "first", on = "Entry", nomatch=0L]
+write.csv(pvalsigFe_df_annot_transcript, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigFE_ALL.csv", row.names = FALSE)
+
+# Identify number of features with significant t-statistic p-value
+pvalsigFe_df_annot_transcript_pvalue <- pvalsigFe_df_annot_transcript %>% filter(pvalue < 0.05)
+dim(pvalsigFe_df_annot_transcript_pvalue)
+# 1562
+```
+
+#### Functional Enrichment: Top 500 features
+##### Upregulated Significant Features
+Identify the significant HH features (pvalue < 0.05) and add LFC columns from DESeq2 to determine which features are upregulated relative to both HD and LD corals
+```{r}
+# Read in sigfeature data
+sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigFE_all.csv")
+
+# Isolate top 500 features
+sigFe_list_annot <- sigFe_list_annot[c(1:500),]
+
+# Find directionality of gene expression between HH and LD corals
+LFC_HH_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_LD.csv")
+names(LFC_HH_v_LD)
+LFC_HH_v_LD <- LFC_HH_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_LD)[2] <- "LFC_HH_vs_LD"
+sigFe_list_merged <- merge(sigFe_list_annot,LFC_HH_v_LD, by="Entry")
+
+# Find features upregulated in HH corals relative to LD
+up_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD < 0) # 369 genes
+
+
+
+# Find directionality of gene expression between HH and HD corals
+LFC_HH_v_HD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_HD.csv")
+names(LFC_HH_v_HD)
+LFC_HH_v_HD <- LFC_HH_v_HD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_HD)[2] <- "LFC_HH_vs_HD"
+sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD, by="Entry")
+
+# Find features upregulated in HH corals relative to HD
+up_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD < 0) # 370 genes
+
+
+# Find features upregulated in HH corals relative to both HD and LD corals
+names(up_sigFe_list_HH_vs_HD)
+up_sigFe_list_HH_vs_HD <- up_sigFe_list_HH_vs_HD[,c(2,9)]
+up_sigFe_list_HH_vs_LD <- up_sigFe_list_HH_vs_LD[,c(2,9)]
+merged <- merge(up_sigFe_list_HH_vs_HD, up_sigFe_list_HH_vs_LD, by="Transcript") # 369 genes
+write.csv(merged,"~/Documents/Dissertation/Mcav_Field/host/SVM/HH/significant_features/top_500/up_sigFe_list_ALL.csv", row.names = FALSE)
+```
+
+##### Downregulated Significant Features
+Identify the significant HH features (pvalue < 0.05) and add LFC columns from DESeq2 to determine which features are downregulated relative to both HD and LD corals
+```{r}
+# Read in sigfeature data
+sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigFE_all.csv")
+
+# Isolate top 500 features
+sigFe_list_annot <- sigFe_list_annot[c(1:500),]
+
+# Find directionality of gene expression between HH and LD corals
+LFC_HH_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_LD.csv")
+names(LFC_HH_v_LD)
+LFC_HH_v_LD <- LFC_HH_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_LD)[2] <- "LFC_HH_vs_LD"
+sigFe_list_merged <- merge(sigFe_list_annot,LFC_HH_v_LD, by="Entry")
+
+# Find features downregulated in HH corals relative to LD
+down_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD > 0) # 131 genes
+
+
+
+# Find directionality of gene expression between HH and HD corals
+LFC_HH_v_HD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_HD.csv")
+names(LFC_HH_v_HD)
+LFC_HH_v_HD <- LFC_HH_v_HD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_HD)[2] <- "LFC_HH_vs_HD"
+sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD, by="Entry")
+
+# Find features downregulated in HH corals relative to HD
+down_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD > 0) # 130 genes
+
+
+# Find features upregulated in HH corals relative to both HD and LD corals
+names(down_sigFe_list_HH_vs_HD)
+down_sigFe_list_HH_vs_LD <- down_sigFe_list_HH_vs_LD[,c(2,9)]
+down_sigFe_list_HH_vs_HD <- down_sigFe_list_HH_vs_HD[,c(2,9)]
+merged <- merge(down_sigFe_list_HH_vs_LD, down_sigFe_list_HH_vs_HD, by="Transcript") # 130 genes
+write.csv(merged,"~/Documents/Dissertation/Mcav_Field/host/SVM/HH/significant_features/top_500/down_sigFe_list_ALL.csv", row.names = FALSE)
+```
+
+##### Combined Enrichment
+Open "up_sigFe_list_ALL.csv" in Excel. Copy and paste the Transcript IDs into [STRING](https://version-12-0.string-db.org/cgi/input?sessionId=bNGEN7A34L5b&input_page_show_search=on) for functional enrichment using the M. cavernosa proteome (STRG0A38MOJ) as reference. To save the enrichments, scroll to the bottom of the "Analysis" tab and download *All enriched terms*. Save as "up_sigFe_list_ALL_enrichments.tsv".
+
+Open "down_sigFe_list_ALL.csv" in Excel. Copy and paste the Transcript IDs into [STRING](https://version-12-0.string-db.org/cgi/input?sessionId=bNGEN7A34L5b&input_page_show_search=on) for functional enrichment using the M. cavernosa proteome (STRG0A38MOJ) as reference. To save the enrichments, scroll to the bottom of the "Analysis" tab and download *All enriched terms*. Save as "down_sigFe_list_ALL_enrichments.tsv".
+
+Visualize the enrichments in bubble plots:
+```{r}
+HH_up_enrichment <- read.csv2("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/significant_features/top_500/up_sigFe_list_ALL_enrichments.tsv", header = TRUE, sep = "\t")
+names(HH_up_enrichment)
+
+# Make sure numeric data is recognized by R as numeric and add -log(padj) column
+HH_up_enrichment$LFC <- "up"
+HH_up_enrichment$false.discovery.rate <- as.numeric(HH_up_enrichment$false.discovery.rate)
+HH_up_enrichment$strength <- as.numeric(HH_up_enrichment$strength)
+HH_up_enrichment$logpadj <- -log(HH_up_enrichment$false.discovery.rate)
+HH_up_enrichment <- HH_up_enrichment[order(HH_up_enrichment$strength),]
+
+# Remove COMPARTMENTS, STRING clusters, and Uniprot Keywords enrichments
+HH_up_enrichment$X.category
+HH_up_enrichment <- subset(HH_up_enrichment, !X.category=="STRING clusters")
+HH_up_enrichment <- subset(HH_up_enrichment, !X.category=="COMPARTMENTS")
+HH_up_enrichment <- subset(HH_up_enrichment, !X.category=="UniProt Keywords")
+
+# Remove terms with strength < 0.9
+HH_up_enrichment_strength <- HH_up_enrichment %>% filter(strength >= 0.9)
+
+# Sort by descending -log(pvalue)
+HH_up_enrichment_strength <- HH_up_enrichment_strength[order(-HH_up_enrichment_strength$logpadj),]
+HH_up_enrichment_strength$term.description
+# Top 5 most interesting and non-redundant enrichments
+# [2] "Collagen formation"                          
+# [3] "Actin binding"
+# [7] "Unsaturated fatty acid biosynthetic process"  
+# [10] "ECM-receptor interaction" 
+# [11] "Chloride transmembrane transporter activity" 
+up_curated_enrichment <- HH_up_enrichment_strength[c(2,3,7,10,11),]
+
+
+HH_down_enrichment <- read.csv2("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/significant_features/top_500/down_sigFE_list_ALL_enrichments.tsv", header = TRUE, sep="\t")
+
+# Make sure numeric data is recognized by R as numeric and add -log(padj) column
+HH_down_enrichment$LFC <- "down"
+HH_down_enrichment$false.discovery.rate <- as.numeric(HH_down_enrichment$false.discovery.rate)
+HH_down_enrichment$strength <- as.numeric(HH_down_enrichment$strength)
+HH_down_enrichment$strength <- HH_down_enrichment$strength*-1 #convert strength to negative
+HH_down_enrichment$logpadj <- -log(HH_down_enrichment$false.discovery.rate)
+HH_down_enrichment <- HH_down_enrichment[order(HH_down_enrichment$strength),]
+
+# Remove COMPARTMENTS, STRING Clusters, and UniProt Keywords enrichments
+HH_down_enrichment$X.category
+HH_down_enrichment <- subset(HH_down_enrichment, !X.category=="STRING clusters")
+HH_down_enrichment <- subset(HH_down_enrichment, !X.category=="COMPARTMENTS")
+HH_down_enrichment <- subset(HH_down_enrichment, !X.category=="Uniprot Keywords")
+
+# Remove terms with strength >= -0.7
+HH_down_enrichment_strength <- HH_down_enrichment %>% filter(strength <= -0.7)
+
+# Sort by descending -log(pvalue)
+HH_down_enrichment_strength <- HH_down_enrichment_strength[order(-HH_down_enrichment_strength$logpadj),]
+HH_down_enrichment_strength$term.description
+# Top 10 most interesting and non-redundant enrichments
+# [3] "Carboxylic acid catabolic process"
+# [5] "Cellular amino acid catabolic process" 
+# [12] "Positive regulation of nitric oxide biosynthetic process"
+# [14] "Urea cycle" 
+# [23] "Regulation of glycogen biosynthetic process" 
+down_curated_enrichment <- HH_down_enrichment_strength[c(3,5,12,14,23),]
+
+# Prepare for plotting
+combined_enrichment <- rbind(up_curated_enrichment, down_curated_enrichment)
+combined_enrichment$new <- str_wrap(combined_enrichment$term.description, width = 26)
+combined_enrichment$LFC <- factor(combined_enrichment$LFC, levels = c("up","down"))
+
+# Plot in bubble plot
+HH_combined_enrichments <- 
+  ggplot(data = combined_enrichment, aes(x="",y=new,color=strength))+
+  geom_point(aes(size=logpadj))+
+  scale_color_gradientn(colors = c("#313695","#74add1","#ffffbf","#f46d43","#a50026"),
+                       limits = c(-2.6,2.6),
+                       breaks = c(-2,-1,0,2,2))+
+  scale_size_continuous(range = c(0,8), limits = c(0,30), breaks = c(10,20,30), name = "-log(FDR)")+
+  facet_wrap(~ LFC, nrow = 2, scales = "free_y")+
+  theme_light()+
+  labs(title = "HH Enrichment",y=NULL,x=NULL)+
+  theme(text = element_text(size=12), legend.position = "right",plot.title = element_text(size=13))
+```
+
+#### Heatmap: Top 15 Features
+Plot the relative expression of the top 15 HH features
+```{r}
+# Pull out the top 15 features
+pvalSigFe <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigFE_ALL.csv")
+pvalSigFe_top15 <- pvalSigFe[c(1:15),]
+
+# Read in rlog expression of those features
+rlogs <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv")
+keepGenes <- pvalSigFe_top15$Entry
+rlogs_keepGenes <- rlogs %>%
+  filter(Entry %in% keepGenes) %>%
+  arrange(match(Entry, keepGenes))
+names(pvalSigFe_top15)
+
+# Format the "Protein.names" column to remove occurrences of "(...)" also removing any leading space
+pvalSigFe_top15$Protein.ID <- gsub(" \\(.*","",as.character(pvalSigFe_top15$Protein.names))
+names(pvalSigFe_top15)
+geneNames <- pvalSigFe_top15[,c(2,9)] # keep "Entry" and "Protein.ID"
+rlogs_keepGenes <- join(rlogs_keepGenes, geneNames, by="Entry")
+
+# Load in metadata
+metadata <- read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv", row.names = "Sample")
+metadata <- as.data.frame(metadata)
+colnames(metadata)
+metadata <- metadata[,c(5,6)] # keep Colony_status and Frag_condition
+names(rlogs_keepGenes)
+mat <- rlogs_keepGenes[,-c(1)]
+mat <- tibble::column_to_rownames(mat,"Protein.ID")
+
+# Modify ordering of the clusters using clustering callback option
+callback= function(hc, mat){
+  sv = svd(t(mat))$v[,1]
+  dend = reorder(as.dendrogram(hc), wts = sv)
+  as.hclust(dend)
+}
+
+breaksList = seq(-2.3, 2.3, by = 0.01)
+annot_colors=list(Frag_Condition=c(HH="#83dbaf",HD="#83cdf2",LD="#f99964"),Colony_status=c(Healthy="#F7c045",Diseased="#F759A6"))
+
+pdf(file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HH/top15features_heatmap.pdf", width = 9, height = 6)
+pheatmap(mat,
+         scale = "row",
+         annotation_col = metadata,
+         clustering_callback = callback,
+         color = colorRampPalette(c("#053061","#2166ac","#4393c3","#92c5de","#d1e5f0","white","#fddbc7","#f4a582","#d6604d","#67001f"))(length(breaksList)),
+         annotation_colors = annot_colors,
+         breaks = breaksList,
+         legend = TRUE,
+         legend_labels = metadata,
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         fontsize_row = 9,
+         fontsize_col = 7,
+         cellwidth = 9,
+         cellheight = 12,
+         treeheight_col = 20,
+         treeheight_row = 15)
+dev.off()
+```
+
+#### Top Features Boxplots
+Research the top features on Uniprot and choose 5 to plot in boxplots
+
+```{r}
+# Prepare expression data
+HH_features <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HH/sigFE_ALL.csv")
+names(HH_features)
+top_15_HH_features <- HH_features[c(1:15),]
+
+# Load in gene expression for the features
+coral_expression <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv")
+top_15_HH_features_expression <- join(top_15_HH_features,coral_expression,by="Entry")
+
+# format the "Gene.names" column to remove occurrences of "(...)" also removing any leading space
+top_15_HH_features_expression$Gene.ID <- gsub(" .*","",as.character(top_15_HH_features_expression$Gene.Names))
+names(top_15_HH_features_expression)
+gene_expression <- top_15_HH_features_expression[,c(9:31)] # keep rlogs and "Gene.ID"
+names(gene_expression)
+gene_expression$Gene.ID
+gene_expression <- tibble::column_to_rownames(gene_expression,"Gene.ID")
+gene_expression_HH <- as.data.frame(t(gene_expression))
+
+# load in metadata to get frag_condition column
+metadata <- read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv")
+names(metadata)
+gene_expression_HH$Frag_Condition <- metadata$Frag_Condition
+names(gene_expression_HH)
+
+# Plot boxplots by Frag_condition
+gene_expression_HH$Frag_Condition <- factor(gene_expression_HH$Frag_Condition, levels = c("HH","HD","LD"))
+names(gene_expression_HH)
+```
+
+##### *Tmem145 - top feature*
+Q8C4U2: Transmembrane protein 145
+
+No information on Uniprot
+
+Predicted to be involved in G protein-coupled receptor signaling pathway and response to pheromone. Predicted to be integral component of membrane.
+
+InterProScan Results: GPR180/TMEM145 protein family
+Associated with TGF-beta signaling as it regulates the activity of the TGF-beta receptor complex through SMAD3 phosphorylation. Also required for the action of Collagen triple helix repeat conatining 1 (CTHRC1) to regulate brown and beige adipocyte activity and glucose homeostasis. 
+
+GO Terms: none
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+gene_expression_HH$title_1 <- "Tmem145"
+
+HH_Tmem145 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=Tmem145, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Tmem145")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_1, )+
+  theme(strip.background = element_rect(fill = "#7ed957"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+##### *PROKR1*
+Q8SPN2: Prokineticin receptor 1
+
+Receptor for prokineticin 1. Exclusively coupled to the G(q) subclass of heteromeric G proteins. Activation leads to mobilization of calcium, stimulation of phosphoinositide turnover and activation of p44/p42 mitogen-activated protein kinase. May play a role during early pregnancy (By similarity).
+
+InterProScan Results: G protein-coupled receptor, rhodopsin-like
+The rhodopsin-like GPCRs (GPCRA) represent a widespread protein family that includes hormone, neurotransmitter and light receptors, all of which transduce extracellular signals through interaction with guanine nucleotide-binding (G) proteins. Although their activating ligands vary widely in structure and character, the amino acid sequences of the receptors are very similar and are believed to adopt a common structural framework comprising 7 transmembrane (TM) helices
+
+GO Terms: G protein-coupled receptor signaling pathway; G protein-coupled receptor activity, petide binding; membrane
+
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+gene_expression_HH$title_2 <- "PROKR1"
+
+HH_PROKR1 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=PROKR1, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "PROKR1")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_2, )+
+  theme(strip.background = element_rect(fill = "#7ed957"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+##### Snai2
+O08954: Zinc finger protein SNAI2
+
+Transcriptional repressor that modulates both activator-dependent and basal transcription. Involved in the generation and migration of neural crest cells. Plays a role in mediating RAF1-induced transcriptional repression of the TJ protein, occludin (OCLN) and subsequent oncogenic transformation of epithelial cells. Represses BRCA2 expression by binding to its E2-box-containing silencer and recruiting CTBP1 and HDAC1 in breast cells. In epidermal keratinocytes, binds to the E-box in ITGA3 promoter and represses its transcription. Involved in the regulation of ITGB1 and ITGB4 expression and cell adhesion and proliferation in epidermal keratinocytes. Binds to E-box2 domain of BSG and activates its expression during TGFB1-induced epithelial-mesenchymal transition (EMT) in hepatocytes. Represses E-Cadherin/CDH1 transcription via E-box elements. Involved in osteoblast maturation. Binds to RUNX2 and SOC9 promoters and may act as a positive and negative transcription regulator, respectively, in osteoblasts. Binds to CXCL12 promoter via E-box regions in mesenchymal stem cells and osteoblasts. Plays an essential role in TWIST1-induced EMT and its ability to promote invasion and metastasis (By similarity).
+
+InterProScan Results: no protein family membership predicted
+Contains two Zinc finger C2H2 type domains
+
+GO Terms: regulation of DNA-templated transcription; DNA-binding transcription factor activity, RNA polymerase II-specific
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_Snai2 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=Snai2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Snai2 ")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+##### Plpp2
+Q8K593: Phospholipid phosphatase 2
+
+Magnesium-independent phospholipid phosphatase that catalyzes the dephosphorylation of a variety of glycerolipid and sphingolipid phosphate esters including phosphatidate/PA, lysophosphatidate/LPA, sphingosine 1-phosphate/S1P and ceramide 1-phosphate/C1P. Has no apparent extracellular phosphatase activity and therefore most probably acts intracellularly. Also acts on N-oleoyl ethanolamine phosphate/N-(9Z-octadecenoyl)-ethanolamine phosphate, a potential physiological compound. Through dephosphorylation of these bioactive lipid mediators produces new bioactive compounds and may regulate signal transduction in different cellular processes (By similarity).
+Indirectly regulates, for instance, cell cycle G1/S phase transition through its phospholipid phosphatase activity 
+
+InterProScan resutls: Phosphatide (PA) phosphatase-related protein family
+This entry represents a group of membrane-associated phosphatidic acid phosphatases and their homologues mostly found in metazoa, fungi and plants. In humans, the members are phospholipid phosphatase 1-5 (PLPP1-5) and phospholipid phosphatase-related protein type 1-5 (PLPR1-5). PLPPs are magnesium-independent phospholipid phosphatase of the plasma membrane that catalyzes the dephosphorylation of a variety of glycerolipid and sphingolipid phosphate esters [3, 4, 5]. PLPR1-5 may not have 2-lysophosphatidate/LPA phosphatase activity due to the lacking of critical residues supporting the reaction mechanism in active phosphatases of this phosphoesterase family.
+
+GO Terms: phospholipid metabolic process, phospholipid dephosphorylation, signal transduction, phospholipid metabolic process; phosphatidate phosphatase activity, lipid phosphatase activity
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_Plpp2 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=Plpp2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Plpp2")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+##### Csgalnact2
+Q8C1F4: Chondroitin sulfate N-acetylgalactosaminyltransferase 2
+Transfers 1,4-N-acetylgalactosamine (GalNAc) from UDP-GalNAc to the non-reducing end of glucuronic acid (GlcUA). Required for addition of the first GalNAc to the core tetrasaccharide linker and for elongation of chondroitin chains (By similarity).
+
+InterProScan Results: Chondroitin N-acetylgalactosaminyltransferase protein family
+This family represents Chondroitin N-acetylgalactosaminyltransferase. Proteins have a type II transmembrane topology. The enzyme is involved in the biosynthetic initiation and elongation of chondroitin sulphate and is the key enzyme responsible for the selective chain assembly of chondroitin/dermatan sulphate on the linkage region tetrasaccharide common to various proteoglycans containing chondroitin/dermatan sulphate or heparin/heparan sulphate chains [1, 2].
+
+GO Terms: chondroitin sulfate biosynthetic process; acetylgalactosaminyltransferase activity; golgi cisterna membrane
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_Csgalnact2 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=Csgalnact2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Csgalnact2")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+##### EEF1AKMT4-ECE2
+P0DPD8: EEF1AKMT4-ECE2 readthrough transcript protein
+Converts big endothelin-1 to endothelin-1. May also have methyltransferase activity (By similarity).
+May play a role in amyloid-beta processing (By similarity).
+
+InterProScan Result: Peptidase M13
+M13 peptidases are well-studied proteases found in a wide range of organisms including mammals and bacteria. In mammals they participate in processes such as cardiovascular development, blood-pressure regulation, nervous control of respiration, and regulation of the function of neuropeptides in the central nervous system. In bacteria they may be used for digestion of milk [4, 1]. The family includes eukaryotic and prokaryotic oligopeptidases, as well as some of the proteins responsible for the molecular basis of the blood group antigens e.g. Kell [1].
+
+GO Terms: proteolysis, protein processing; metalloendopeptidase activity; plasma membrane
+```{r, fig.height=2.5, fig.width=3.2}
+compare_means(`EEF1AKMT4-ECE2` ~ Frag_Condition,data=gene_expression_HH)
+
+#HH_EEF1AKMT4-ECE2 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=`EEF1AKMT4-ECE2`, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "EEF1AKMT4-ECE2")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+##### GABRB3
+P63079: Gamma-aminobutyric acid receptor subunit beta-3
+Ligand-gated chloride channel which is a component of the heteropentameric receptor for GABA, the major inhibitory neurotransmitter in the brain (PubMed:2548852, PubMed:2540033).
+Plays an important role in the formation of functional inhibitory GABAergic synapses in addition to mediating synaptic inhibition as a GABA- gated ion channel (By similarity).
+The gamma2 subunit is necessary but not sufficient for a rapid formation of active synaptic contacts and the synaptogenic effect of this subunit is influenced by the type of alpha and beta subunits present in the receptor pentamer (By similarity).
+The alpha1/beta3/gamma2 receptor exhibits synatogenic activity whereas the alpha2/beta3/gamma2 receptor shows very little or no synaptogenic activity (By similarity).
+Functions also as histamine receptor and mediates cellular responses to histamine (By similarity).
+Plays an important role in somatosensation and in the production of antinociception (By similarity).
+
+InterProScan results: Gamma-aminobutyric acid A receptor/Glycine receptor alpha
+Gamma-aminobutyric acid type A (GABAA) receptors are members of the neurotransmitter ligand-gated ion channels: they mediate neuronal inhibition on binding GABA. The effects of GABA on GABAA receptors are modulated by a range of therapeutically important drugs, including barbiturates, anaesthetics and benzodiazepines (BZs) [1]. The BZs are a diverse range of compounds, including widely prescribed drugs, such as librium and valium, and their interaction with GABAA receptors provides the most potent pharmacological means of distinguishing different GABAA receptor subtypes.
+
+GO Terms: monoatomic ion transmembrane transport, monoatomic ion transport, chemical synaptic transmission, regulation of membrane potential, signal transduction, chloride transmembrane transport, nervous system process; monoatomic ion channel activity, transmembrane signaling receptor activity, extracellular ligand-gated monoatomic ion channel; membrane, neuron projection, synapse
+```{r, fig.height=3, fig.width=3.6}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_GABRB3 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=GABRB3, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "GABRB3")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+##### unc93a
+Q6DDL7: Protein unc-93 homolog A
+Unknown function
+
+UNC93A homolog in humans ia a major facilitator superfamily (MFS), and a putative solute carrier in humans. It belongs to the atypical SLCs that was recently listed. It is therefore presumed that UNC93A is a transporter protein. Affected by amino acid deprivation in cell cortex culture and starvation in in vivo samples. Expressed in neurons, with staining close to the plasma membrane. 
+
+InterProScan resutls: Ion channel regulatory protein, UNC093 protein family
+This family represents UNC-93 from Caenorhabditis elegans, protein unc-93 homologue A (UNC93A) and UNC93-like protein MFSD11 (also called major facilitator superfamily domain-containing protein 11 or protein ET) from mammals, and similar eukaryotic proteins. UNC-93 colocalises with SUP-10 and SUP-9 within muscle cells. UNC-93 acts as a regulatory subunit of a multi-subunit potassium channel complex that may function in coordinating muscle contraction in C. elegans [1]. MFSD11 is ubiquitously expressed in the periphery and the central nervous system of mice, where it is expressed in excitatory and inhibitory mouse brain neurons [2].
+
+GO Terms: none
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_unc93a <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=unc93a, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "unc93a")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+##### *INHBB*
+P27093: Inhibin beta B chain
+Inhibins and activins inhibit and activate, respectively, the secretion of follitropin by the pituitary gland. Inhibins/activins are involved in regulating a number of diverse functions such as hypothalamic and pituitary hormone secretion, gonadal hormone secretion, germ cell development and maturation, erythroid differentiation, insulin secretion, nerve cell survival, embryonic axial development or bone growth, depending on their subunit composition. Inhibins appear to oppose the functions of activins.
+
+INHBB is a subunit of both activin and inhibin
+
+InterProScan results: Transforming growth factor-beta related protein family
+The transforming growth factor (TGF)-beta superfamily of cytokines is comprised of a number of structurally related, secreted polypeptides that regulate a multitude of cellular processes including proliferation, differentiation and neoplastic transformation [1, 2]. Family members include the activins/inhibins, bone morphogenetic proteins (BMPs), growth and differentiation factors (GDFs) and TGF-betas [2, 3]. These growth regulatory molecules induce ligand-mediated hetero-oligomerization of distinct type II and type I serine/threonine kinase receptors that transmit signals predominantly through receptor-activated Smad proteins [4] but also induce Smad-independent pathways.
+
+GO Terms: SMAD protein signal transduction; growth factor activity, cytokine activity; extracellular region, extracellular space
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+gene_expression_HH$title_3 <- "INHBB"
+
+HH_INHBB <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=INHBB, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "INHBB")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_3, )+
+  theme(strip.background = element_rect(fill = "#7ed957"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+##### *crt*
+P52046: Short-chain-enoyl-CoA hydratase
+Catalyzes the reversible hydration of crotonyl-CoA. Can also use hexenoyl-CoA but not higher analogs.
+
+InterProScan Results: Enoyl-CoA hydratase/isomerase protein family
+This family contains a diverse set of enzymes from cellular organisms, including: fatty acid oxidation complex subunit alpha, enoyl-CoA hydratase, 1,4-dihydroxy-2-naphthoyl-CoA synthase (napthoate synthase), carnitinyl-CoA dehydratase (carnitine racemase), 3-hydroxybutyryl-CoA dehydratase and enoyl-CoA delta isomerase (dodecanoyl-CoA delta-isomerase).
+
+GO Terms: fatty acid beta-oxidation; catalytic activity, enoyl-CoA hydratase activity
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+HH_crt <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=crt, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "crt")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+##### Matn4
+O89029: Matrilin-4
+Major component of the extracellular matrix of cartilage.
+
+InterProScan results: no protein family membership predicted
+Contains two von Willebrand facor A domains
+
+GO Terms: none
+```{r, fig.height=2.5, fig.width=3.2}
+names(gene_expression_HH)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_Matn4 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=Matn4, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Matn4")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+
+##### *NAIP*
+Q13075: Baculoviral IAP repeat-containing protein 1
+Anti-apoptotic protein which acts by inhibiting the activities of CASP3, CASP7 and CASP9. Can inhibit the autocleavage of pro-CASP9 and cleavage of pro-CASP3 by CASP9. Capable of inhibiting CASP9 autoproteolysis at 'Asp-315' and decreasing the rate of auto proteolysis at 'Asp-330'. Acts as a mediator of neuronal survival in pathological conditions. Prevents motor-neuron apoptosis induced by a variety of signals. Possible role in the prevention of spinal muscular atrophy that seems to be caused by inappropriate persistence of motor-neuron apoptosis: mutated or deleted forms of NAIP have been found in individuals with severe spinal muscular atrophy.
+Acts as a sensor component of the NLRC4 inflammasome that specifically recognizes and binds needle protein CprI from pathogenic bacteria C.violaceum. Association of pathogenic bacteria proteins drives in turn drive assembly and activation of the NLRC4 inflammasome, promoting caspase-1 activation, cytokine production and macrophage pyroptosis. The NLRC4 inflammasome is activated as part of the innate immune response to a range of intracellular bacteria such as C.violaceum and L.pneumophila.
+
+InterProScan Results: no protein family membership predicted
+Contains 1 BIR repeat: The 'baculovirus inhibitior of apoptosis protein repeat' (BIR) [1, 2] is a domain of about 70 residues arranged in tandem repeats separated by a variable length linker, that seems to confer cell death-preventing activity. It is found in proteins belonging to the IAP (inhibitor of apoptosis proteins) family. The critical motifs required for anti-apoptotic activity of IAP proteins are the BIRs. All IAP proteins contain from one to three BIRs, and all known interactions between IAPs and other proteins are mediated by one or more BIRs [3]. In higher eukaryotes, BIR domains inhibit apoptosis by acting as direct inhibitors of the caspase family of protease enzymes. Proteins with BIR domains are considered peptidase inhibitors in family I32. In yeast, BIR domains are involved in regulating cytokinesis. This novel fold is stabilized by zinc tetrahedrally coordinated by one histidine and three cysteine residues and resembles a classical zinc finger [4].
+
+GO Terms: positive regulation of protein ubiquitination, regulation of cell cycle, negative regulation of apoptotic process; cysteine-type endopeptidase inhibitor activity involved in apoptotic process, ubiquitin protein ligase activity; spindle microtubule, cytoplasm, nucleus
+```{r, fig.height=2.5, fig.width=3.2}
+names(gene_expression_HH)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+gene_expression_HH$title_4 <- "NAIP"
+
+
+HH_NAIP <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=NAIP, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "NAIP")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+ facet_grid(. ~ title_4, )+
+  theme(strip.background = element_rect(fill = "#7ed957"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+
+
+##### *Dmbt1*
+Q60997: Deleted in malignant brain tumors 1 protein
+May play roles in mucosal defense system and cellular immune defense. May play a role in liver regeneration. May be an important factor in fate decision and differentiation of transit-amplifying ductular (oval) cells within the hepatic lineage. May function as a binding protein in saliva for the regulation of taste sensation. May play a role as an opsonin receptor for SFTPD and SPAR in macrophage tissues throughout the body, including epithelial cells lining the gastrointestinal tract (By similarity).
+Required for terminal differentiation of columnar epithelial cells during early embryogenesis. Displays a broad calcium-dependent binding spectrum against both Gram-positive and Gram-negative bacteria, suggesting a role in defense against bacterial pathogens. Binds to a range of poly-sulfated and poly-phosphorylated ligands which may explain its broad bacterial-binding specificity. Inhibits cytoinvasion of S.enterica. Associates with the actin cytoskeleton and is involved in its remodeling during regulated exocytosis. Interacts with pancreatic zymogens in a pH-dependent manner and may act as a Golgi cargo receptor in the regulated secretory pathway of the pancreatic acinar cell
+
+InterproScan Results: no protein family membership predicted
+Contains 2 CUB domains: The CUB domain (for complement C1r/C1s, Uegf, Bmp1) is a structural motif of approximately 110 residues found almost exclusively in extracellular and plasma membrane-associated proteins, many of which are developmentally regulated [1, 2]. These proteins are involved in a diverse range of functions, including complement activation, developmental patterning, tissue repair, axon guidance and angiogenesis, cell signalling, fertilisation, haemostasis, inflammation, neurotransmission, receptor-mediated endocytosis, and tumour suppression [3]. Many CUB-containing proteins are peptidases belonging to MEROPS peptidase families M12A (astacin) and S1A (chymotrypsin). 
+
+GO Terms: none
+```{r, fig.height=2.5, fig.width=3.2}
+names(gene_expression_HH)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+gene_expression_HH$title_5 <- "Dmbt1"
+
+HH_Dmbt1 <- 
+  ggplot(gene_expression_HH,
+         aes(x=Frag_Condition, y=Dmbt1, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Dmbt1")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_5, )+
+  theme(strip.background = element_rect(fill = "#7ed957"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+##### Combined Figure
+```{r, fig.width=9.5, fig.height=3}
+pdf("~/OneDrive - University of Texas at Arlington/Dissertation/Mcav_Field/host/SVM/HH/selected_features_boxplot_colors.pdf",width = 9.5,height = 3)
+ggarrange(HH_Tmem145,
+          HH_PROKR1,
+          HH_INHBB,
+          HH_NAIP,
+          HH_Dmbt1,
+          ncol = 5,nrow = 1,
+          common.legend = TRUE, legend = "bottom",
+          align = "hv"
+          )
+dev.off()
+```
+
+
+
+
+
+
+
+### HD
+
+The variable 'X' contains the gene expression data, and 'Y' contains the sample labels. 'X' is a two-dimensional matrix in which the row contains the sample names, and the column contains the gene/feature names. The variable 'Y' contains the sample labels as -1 and 1. 
+```{r}
+# Use expression data as the X matrix
+expression_data <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv", row.names = "Entry")
+X <- as.data.frame(t(expression_data))
+dim(X)
+# 22 17229
+
+# Use the class data (fragment condition) as the Y matrix
+# For this run we will do HD vs everything else, so adjust the "Frag_Condition" column where HD = 1 and everything else = -1
+metadata <- as.data.frame(read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv"))
+metadata <- metadata %>%
+  mutate(Frag_Condition = ifelse(Frag_Condition == "HD", 1, -1))
+
+Y <- metadata$Frag_Condition
+names(Y) <- metadata$Sample
+Y
+```
+
+```{r}
+system.time(sigfeatureRankedList <- sigFeature(X,Y))
+#     user   system  elapsed 
+# 2067.128   28.774 2672.876 
+
+save(X, Y, expression_data, metadata, sigfeatureRankedList, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFeatureRankedList_HD.RData")
+```
+
+The variable "sigfeatureRankedList" will return the address of the genes/features after execution. To visualize the output, print the address of top 10 ranked genes/features. 
+```{r}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFeatureRankedList_HD.RData")
+print(sigfeatureRankedList[1:10])
+# [1]  5347 10577  1960   923 10299  2744   615  4663  9042 10662
+
+# Identify the Entry IDs of the top 10 features using the above locations:
+expression_data <- tibble::rownames_to_column(expression_data, "Entry")
+expression_data[c(sigfeatureRankedList[1:10]),1]
+```
+
+Produce the model vector for training the dataset using the top 1000 genes/features. Linear kernel is chosen to get better performance.
+```{r}
+sigFeature.model=svm(X[ ,sigfeatureRankedList[1:1000]], Y, type = "C-classification",
+                     kernel = "linear")
+summary(sigFeature.model)
+```
+
+Show the prediction results of the same dataset that was trained before.
+```{r}
+pred <- predict(sigFeature.model, X[ ,sigfeatureRankedList[1:1000]])
+table(pred,Y)
+```
+
+The function svmrfeFeatureRanking() is included in this package to compare the performance with "sigFeature()"
+```{r}
+system.time(featureRankedList <- svmrfeFeatureRanking(X,Y))
+#     user   system  elapsed 
+# 2064.856   28.673 2098.346 
+save(X,Y, expression_data, metadata, sigfeatureRankedList, featureRankedList, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HD/featureRankedList_HD.RData")
+```
+
+The top 10 features from svmrfe are printed below:
+```{r}
+print(featureRankedList[1:10])
+# [1] 10048  2193 13944 12718  3607  6609 11237 12656  5508 16384
+
+expression_data[c(featureRankedList[1:10]),1]
+```
+
+Produce the model vector for training the dataset using the top 1000 genes/features:
+```{r}
+RFE.model=svm(X[ ,featureRankedList[1:1000]], Y, 
+            type="C-classification", kernel="linear")
+summary(RFE.model)
+```
+
+The R script below shows the prediction result of the same dataset that was trained before.
+```{r}
+pred <- predict(RFE.model, X[ ,featureRankedList[1:1000]])
+table(pred,Y)
+```
+
+In this example section we will observe the p-value of the selected top 100 features. The function named "sigFeaturePvalue()" will calculate the p-value using t-statistic. The expression value will be taken from the dataset of the top 100 features.
+```{r, fig.width=8, fig.height=4}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/featureRankedList_HD.RData")
+pvalsigFe <- sigFeaturePvalue(X, Y, 100, sigfeatureRankedList)
+pvalRFE <- sigFeaturePvalue(X, Y, 100, featureRankedList)
+par(mfrow=c(1,2))
+hist(unlist(pvalsigFe), breaks = 50, col="skyblue", main=paste("sigFeature"), xlab = "p-value")
+hist(unlist(pvalRFE), breaks = 50, col="skyblue", main=paste("SVM-RFE"), xlab="p-value")
+```
+
+In this section a comparison of p-values produced by using the top 100 features (using "sigFeature" and "SVM-RFE" algorithms) is shown using scatter boxplots
+```{r, fig.width=6, fig.height=4}
+mytitle <- "Box Plot"
+par(mfrow=c(1,1))
+
+boxplot(unlist(pvalsigFe), unlist(pvalRFE), main=mytitle,
+        names=c("sigFeature","SVM-RFE"),
+        ylab="p-value", ylim=c(min(unlist(pvalsigFe)),
+                               max(unlist(pvalRFE))))
+stripchart(unlist(pvalsigFe), vertical = TRUE,
+           method = "jitter", add=TRUE, 
+           pch=16, col=c('green'))
+stripchart(unlist(pvalRFE), vertical = TRUE,
+           at=2, method = "jitter", add=TRUE,
+           pch=16, col=c('blue'))
+grid(nx=NULL, ny=NULL, col="black",lty="dotted")
+```
+
+For estimation of feature selection algorithms, Ambroise and McLachlan (2002) suggested external cross-validation, in which the feature selection and validation are performed on different parts of the sample set, to obtain an unbiased performance estimate. The stratified cross-validation (Brieman et al., 1984) is slightly different from regular cross-validation. In k-fold stratified cross-validation, a dataset is randomly partitioned into k equally sized folds such that the class distribution in each fold is approximately the same as that in the entire dataset. In contrast, regular cross-validation randomly partitions the dataset into k-folds without considering class distributions. Kohavi (1995) reported that stratified cross-validation has smaller bias and variance than regular cross-validation. The "sigFeature()" function thus further enhances by incorporating external cross-validation method. In this external k-fold cross validation procedure, k-1 folds are used for selecting the feature, and one fold remains untouched with will later use as a test sample set.
+```{r}
+results = sigFeature.enfold(X, Y, "kfold", 10)
+# takes about 12 hours to run
+
+str(results[1])
+
+save(X,Y,expression_data,metadata,sigfeatureRankedList,featureRankedList,pvalRFE, pvalsigFe,RFE.model,sigFeature.model, results, file="~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigfeatureEnfold_HD.RData")
+```
+
+In this section, a new function is introduced named "sigFeatureFrequency()". The main purpose of this function is to arrange the feature on the basis of its frequency. In the previous section the dataset is divided into k-folds, out of which k-1 folds are randomly taken and used for selecting the feature. This procedure is repeated k times and the frequency values are calculated for top 400 genes from the k number of lists. The "sigFeatureFrequency()" function is used here to rank further all the k'th feature lists according to its frequency.
+```{r}
+FeatureBasedonFrequency <- sigFeatureFrequency(X, results, 400, 400, pf=FALSE)
+str(FeatureBasedonFrequency)
+```
+
+In this section external cross-validation is computed and finally mean cross validation errors and the standard deviation of the errors is returned. The features, which are produced on the basis of frequnecy, are used for producing the mean cross-validation error. Training and test samples were initially split from the main sample set into k-folds. In each iteration k-1 fold are considered as training sample and remaining one fold is considered as testing sample. In this external cross-validation procedure, feature number is increased one by one. The number of miss-classification is averaged out for each fold change which finally is represented as error rate.
+```{r}
+inputdata <- data.frame(y=as.factor(Y), x=X)
+featsweepSigFe = lapply(1:400, sigCVError, FeatureBasedonFrequency, inputdata)
+# Takes multiple days to run
+
+str(featsweepSigFe[1])
+save(X,Y,expression_data,metadata,sigfeatureRankedList,featureRankedList,pvalRFE, pvalsigFe,RFE.model,sigFeature.model, results, FeatureBasedonFrequency, inputdata, featsweepSigFe, file="~/Documents/Dissertation/Mcav_Field/host/SVM/HD/featsweepSigFe_HD.RData")
+```
+
+In this section the "PlotErrors()" function draws two plots: the first plot represents the average external cross-validation error and the second plot represents the standard deviation of the miss-classification.
+```{r, fig.height=4, fig.width=6}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/featsweepSigFe_HD.RData")
+pdf(file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HD/algorithm_figures/sigFe_CV_errors_raw.pdf", height = 4, width = 6)
+PlotErrors(featsweepSigFe, 0, 0.4)
+dev.off()
+# Change colors in illustrator
+```
+
+
+
+#### Gene Lists of Results
+```{r}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/featsweepSigFe_HD.RData")
+
+# Obtain pvalues for sigFeature ranked list
+pvalsigFe <- sigFeaturePvalue(X,Y,17229,sigfeatureRankedList)
+pvalsigFe_df <- as.data.frame(pvalsigFe)
+colnames(pvalsigFe_df) <- colnames(X[,sigfeatureRankedList[1:17229]])
+pvalsigFe_df <- as.data.frame(t(pvalsigFe_df))
+colnames(pvalsigFe_df) <- "pvalue"
+pvalsigFe_df <- tibble::rownames_to_column(pvalsigFe_df, "Entry")
+
+# annotate the significant features with Uniprot information
+annot <- read.csv("~/Documents/Dissertation/Mcav_Field/uniprotkb_AND_reviewed_true_2023_08_21.csv")
+pvalsigFe_df_annot <- as.data.frame(join(pvalsigFe_df,annot,by="Entry"))
+
+# annotate the sig features with Transcript ID
+mcav_annot <- as.data.frame(read.csv("~/Documents/Dissertation/Mcav_Field/host/salmon/mcav_tx2gene.csv"))
+require(data.table)
+setDT(mcav_annot); setDT(pvalsigFe_df_annot)
+pvalsigFe_df_annot_transcript <- mcav_annot[pvalsigFe_df_annot, mult = "first", on = "Entry", nomatch=0L]
+write.csv(pvalsigFe_df_annot_transcript, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFE_ALL.csv", row.names = FALSE)
+
+# Identify number of features with significant t-statistic p-value
+pvalsigFe_df_annot_transcript_pvalue <- pvalsigFe_df_annot_transcript %>% filter(pvalue < 0.05)
+dim(pvalsigFe_df_annot_transcript_pvalue)
+# 5286
+```
+
+
+
+#### Functional Enrichment: Top 500 features
+##### Upregulated Significant Features
+Identify the significant HD features (pvalue < 0.05) and add LFC columns from DESeq2 to determine which features are upregulated relative to both HH and LD corals
+```{r}
+# Read in sigfeature data
+sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFE_all.csv")
+
+# Isolate top 500 features
+sigFe_list_annot <- sigFe_list_annot[c(1:500),]
+
+# Find directionality of gene expression between HD and LD corals
+LFC_HD_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
+names(LFC_HD_v_LD)
+LFC_HD_v_LD <- LFC_HD_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HD_v_LD)[2] <- "LFC_HD_vs_LD"
+sigFe_list_merged <- merge(sigFe_list_annot,LFC_HD_v_LD, by="Entry")
+
+# Find features upregulated in HD corals relative to LD
+up_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD < 0) # 202 genes
+
+
+
+# Find directionality of gene expression between HH and HD corals
+LFC_HH_v_HD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_HD.csv")
+names(LFC_HH_v_HD)
+LFC_HH_v_HD <- LFC_HH_v_HD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_HD)[2] <- "LFC_HH_vs_HD"
+sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD,by="Entry")
+names(sigFe_list_merged)
+
+# Find features upregulated in HD corals relative to HH
+up_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD > 0) # 203 genes
+
+# Find features upregulated in HD corals relative to both HH and LD corals
+names(up_sigFe_list_HD_vs_LD)
+up_sigFe_list_HD_vs_LD <- up_sigFe_list_HD_vs_LD[,c(2,9)]
+up_sigFe_list_HH_vs_HD <- up_sigFe_list_HH_vs_HD[,c(2,9)]
+merged <- merge(up_sigFe_list_HD_vs_LD,up_sigFe_list_HH_vs_HD,by="Transcript") # 202 genes
+write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/HD/significant_features/top_500/up_sigFe_list_ALL.csv", row.names = FALSE)
+```
+
+##### Downregulated Significant Features
+Identify the significant HD features (pvalue < 0.05) and add LFC columns from DESeq2 to determine which features are downregulated relative to both HD and LD corals
+```{r}
+# Read in sigfeature data
+sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFE_all.csv")
+
+# Isolate top 500 features
+sigFe_list_annot <- sigFe_list_annot[c(1:500),]
+
+# Find directionality of gene expression between HD and LD corals
+LFC_HD_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
+names(LFC_HH_v_LD)
+LFC_HD_v_LD <- LFC_HD_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HD_v_LD)[2] <- "LFC_HD_vs_LD"
+sigFe_list_merged <- merge(sigFe_list_annot,LFC_HD_v_LD, by="Entry")
+
+# Find features downregulated in HD corals relative to LD
+down_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD > 0) # 298 genes
+
+
+
+# Find directionality of gene expression between HH and HD corals
+LFC_HH_v_HD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_HD.csv")
+names(LFC_HH_v_HD)
+LFC_HH_v_HD <- LFC_HH_v_HD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_HD)[2] <- "LFC_HH_vs_HD"
+sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD,by="Entry")
+names(sigFe_list_merged)
+
+# find features downregulated in HD corals relative to HH
+down_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD < 0) # 297 genes
+
+
+# find features downregulated in HD corals relative to both HH and LD corals
+names(down_sigFe_list_HD_vs_LD)
+down_sigFe_list_HD_vs_LD <- down_sigFe_list_HD_vs_LD[,c(2,9)]
+down_sigFe_list_HH_vs_HD <- down_sigFe_list_HH_vs_HD[,c(2,9)]
+merged <- merge(down_sigFe_list_HD_vs_LD,down_sigFe_list_HH_vs_HD,by="Transcript") # 297 genes
+write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/HD/significant_features/top_500/down_sigFe_list_ALL.csv", row.names = FALSE)
+```
+
+##### Combined Enrichment
+Open "up_sigFe_list_ALL.csv" in Excel. Copy and paste the Transcript IDs into [STRING](https://version-12-0.string-db.org/cgi/input?sessionId=bNGEN7A34L5b&input_page_show_search=on) for functional enrichment using the M. cavernosa proteome (STRG0A38MOJ) as reference. To save the enrichments, scroll to the bottom of the "Analysis" tab and download *All enriched terms*. Save as "up_sigFe_list_ALL_enrichments.tsv".
+
+Open "down_sigFe_list_ALL.csv" in Excel. Copy and paste the Transcript IDs into [STRING](https://version-12-0.string-db.org/cgi/input?sessionId=bNGEN7A34L5b&input_page_show_search=on) for functional enrichment using the M. cavernosa proteome (STRG0A38MOJ) as reference. To save the enrichments, scroll to the bottom of the "Analysis" tab and download *All enriched terms*. Save as "down_sigFe_list_ALL_enrichments.tsv".
+
+Visualize the enrichments in bubble plots:
+```{r}
+HD_up_enrichment <- read.csv2("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/significant_features/top_500/up_sigFe_list_ALL_enrichments.tsv", header = TRUE, sep = "\t")
+names(HD_up_enrichment)
+
+# Make sure numeric data is recognized by R as numeric and add -log(padj) column
+HD_up_enrichment$LFC <- "up"
+HD_up_enrichment$false.discovery.rate <- as.numeric(HD_up_enrichment$false.discovery.rate)
+HD_up_enrichment$strength <- as.numeric(HD_up_enrichment$strength)
+HD_up_enrichment$logpadj <- -log(HD_up_enrichment$false.discovery.rate)
+HD_up_enrichment <- HD_up_enrichment[order(HD_up_enrichment$strength),]
+
+# Remove COMPARTMENTS, STRING clusters, and Uniprot Keywords enrichments
+HD_up_enrichment$X.category
+HD_up_enrichment <- subset(HD_up_enrichment, !X.category=="STRING clusters")
+HD_up_enrichment <- subset(HD_up_enrichment, !X.category=="COMPARTMENTS")
+HD_up_enrichment <- subset(HD_up_enrichment, !X.category=="UniProt Keywords")
+
+# Remove terms with strength < 0.7
+HD_up_enrichment_strength <- HD_up_enrichment %>% filter(strength >= 0.7)
+
+# Sort by descending -log(pvalue)
+HD_up_enrichment_strength <- HD_up_enrichment_strength[order(-HD_up_enrichment_strength$logpadj),]
+HD_up_enrichment_strength$term.description
+# Top 5 most interesting and non-redundant enrichments
+# [1] "Carboxylic acid metabolic process"    
+# [2] "Aminoacyl-tRNA biosynthesis"   
+# [7] "Amide biosynthetic process" 
+# [8] "Translation"  
+# [20] "Phosphatidylinositol signaling system" 
+up_curated_enrichment <- HD_up_enrichment_strength[c(1,2,7,8,20),]
+
+
+HD_down_enrichment <- read.csv2("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/significant_features/top_500/down_sigFE_list_ALL_enrichments.tsv", header = TRUE, sep="\t")
+
+# Make sure numeric data is recognized by R as numeric and add -log(padj) column
+HD_down_enrichment$LFC <- "down"
+HD_down_enrichment$false.discovery.rate <- as.numeric(HD_down_enrichment$false.discovery.rate)
+HD_down_enrichment$strength <- as.numeric(HD_down_enrichment$strength)
+HD_down_enrichment$strength <- HD_down_enrichment$strength*-1 #convert strength to negative
+HD_down_enrichment$logpadj <- -log(HD_down_enrichment$false.discovery.rate)
+HD_down_enrichment <- HD_down_enrichment[order(HD_down_enrichment$strength),]
+
+# Remove COMPARTMENTS, STRING Clusters, and UniProt Keywords enrichments
+HD_down_enrichment$X.category
+HD_down_enrichment <- subset(HD_down_enrichment, !X.category=="STRING clusters")
+HD_down_enrichment <- subset(HD_down_enrichment, !X.category=="COMPARTMENTS")
+HD_down_enrichment <- subset(HD_down_enrichment, !X.category=="Uniprot Keywords")
+
+# Remove terms with strength >= -1
+HD_down_enrichment_strength <- HD_down_enrichment %>% filter(strength <= -1.0)
+
+# Sort by descending -log(pvalue)
+HD_down_enrichment_strength <- HD_down_enrichment_strength[order(-HD_down_enrichment_strength$logpadj),]
+HD_down_enrichment_strength$term.description
+# Top 5 most interesting and non-redundant enrichments
+# [6] "Cilium assembly"   
+# [8] "Mitochondrion organization"  
+# [9] "Cilium movement"  
+# [12] "Protein localization to membrane" 
+# [20] "Mitochondrial respiratory chain complex assembly" 
+down_curated_enrichment <- HD_down_enrichment_strength[c(6,8,9,12,20),]
+
+# Prepare for plotting
+combined_enrichment <- rbind(up_curated_enrichment, down_curated_enrichment)
+combined_enrichment$new <- str_wrap(combined_enrichment$term.description, width = 26)
+combined_enrichment$LFC <- factor(combined_enrichment$LFC, levels = c("up","down"))
+
+# Plot in bubble plot
+HD_combined_enrichments <- 
+  ggplot(data = combined_enrichment, aes(x="",y=new,color=strength))+
+  geom_point(aes(size=logpadj))+
+  scale_color_gradientn(colors = c("#313695","#74add1","#ffffbf","#f46d43","#a50026"),
+                       limits = c(-2.6,2.6),
+                       breaks = c(-2,-1,0,2,2))+
+  scale_size_continuous(range = c(0,8), limits = c(0,30), breaks = c(10,20,30), name = "-log(FDR)")+
+  facet_wrap(~ LFC, nrow = 2, scales = "free_y")+
+  theme_light()+
+  labs(title = "HD Enrichment",y=NULL,x=NULL)+
+  theme(text = element_text(size=12), legend.position = "right",plot.title = element_text(size=13))
+```
+
+#### Heatmap: Top 15 Features
+Plot the relative expression of the top 15 HH features
+```{r}
+# Pull out the top 15 features
+pvalSigFe <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFE_ALL.csv")
+pvalSigFe_top15 <- pvalSigFe[c(1:15),]
+
+# Read in rlog expression of those features
+rlogs <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv")
+keepGenes <- pvalSigFe_top15$Entry
+rlogs_keepGenes <- rlogs %>%
+  filter(Entry %in% keepGenes) %>%
+  arrange(match(Entry, keepGenes))
+names(pvalSigFe_top15)
+
+# Format the "Protein.names" column to remove occurrences of "(...)" also removing any leading space
+pvalSigFe_top15$Protein.ID <- gsub(" \\(.*","",as.character(pvalSigFe_top15$Protein.names))
+names(pvalSigFe_top15)
+geneNames <- pvalSigFe_top15[,c(2,9)] # keep "Entry" and "Protein.ID"
+rlogs_keepGenes <- join(rlogs_keepGenes, geneNames, by="Entry")
+
+# Load in metadata
+metadata <- read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv", row.names = "Sample")
+metadata <- as.data.frame(metadata)
+colnames(metadata)
+metadata <- metadata[,c(5,6)] # keep Colony_status and Frag_condition
+names(rlogs_keepGenes)
+mat <- rlogs_keepGenes[,-c(1)]
+mat <- tibble::column_to_rownames(mat,"Protein.ID")
+
+# Modify ordering of the clusters using clustering callback option
+callback= function(hc, mat){
+  sv = svd(t(mat))$v[,1]
+  dend = reorder(as.dendrogram(hc), wts = sv)
+  as.hclust(dend)
+}
+
+breaksList = seq(-2.3, 2.3, by = 0.01)
+annot_colors=list(Frag_Condition=c(HH="#83dbaf",HD="#83cdf2",LD="#f99964"),Colony_status=c(Healthy="#F7c045",Diseased="#F759A6"))
+
+pdf(file = "~/Documents/Dissertation/Mcav_Field/host/SVM/HD/top15features_heatmap.pdf", width = 9, height = 6)
+pheatmap(mat,
+         scale = "row",
+         annotation_col = metadata,
+         clustering_callback = callback,
+         color = colorRampPalette(c("#053061","#2166ac","#4393c3","#92c5de","#d1e5f0","white","#fddbc7","#f4a582","#d6604d","#67001f"))(length(breaksList)),
+         annotation_colors = annot_colors,
+         breaks = breaksList,
+         legend = TRUE,
+         legend_labels = metadata,
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         fontsize_row = 9,
+         fontsize_col = 7,
+         cellwidth = 9,
+         cellheight = 12,
+         treeheight_col = 20,
+         treeheight_row = 15)
+dev.off()
+```
+
+### Top Features Boxpot
+Research the top features on uniprot and choose 3 to plot in a boxplot
+
+```{r}
+# Prepare expression data
+HD_features <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFE_ALL.csv")
+names(HD_features)
+top_15_HD_features <- HD_features[c(1:15),]
+
+# Load in gene expression for the features
+coral_expression <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv")
+top_15_HD_features_expression <- join(top_15_HD_features,coral_expression,by="Entry")
+
+# format the "Gene.names" column to remove occurrences of "(...)" also removing any leading space
+top_15_HD_features_expression$Gene.ID <- gsub(" .*","",as.character(top_15_HD_features_expression$Gene.Names))
+names(top_15_HD_features_expression)
+gene_expression <- top_15_HD_features_expression[,c(9:31)] # keep rlogs and "Gene.ID"
+names(gene_expression)
+gene_expression$Gene.ID
+gene_expression <- tibble::column_to_rownames(gene_expression,"Gene.ID")
+gene_expression_HD <- as.data.frame(t(gene_expression))
+
+# load in metadata to get frag_condition column
+metadata <- read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv")
+names(metadata)
+gene_expression_HD$Frag_Condition <- metadata$Frag_Condition
+names(gene_expression_HD)
+
+# Plot boxplots by Frag_condition
+gene_expression_HD$Frag_Condition <- factor(gene_expression_HD$Frag_Condition, levels = c("HH","HD","LD"))
+names(gene_expression_HD)
+my_comparisons <- list(c("HH","HD"),c("HD","LD"),c("HH","LD"))
+```
+
+#### *Ucp2 - top feature*
+P56500: Dicarboxylate carrier SLC25A8
+Mitochondrial uncoupling proteins (UCP) are members of the larger family of mitochonddrial anion carrier proteins (MACP). UCPs separate oxidative phosphorylation from ATP synthesis with energy dissipated as heat, also referred to as the mitochondrial proton leak. UCPs facilitate the transfer of anions from the inner to the outer mitochondrial membrane and the return transfer of protons from the outer to the inner mitochondrial membrane. Physiological role is to decrease mitochondrial membrane potential and reactive oxygen species (ROS) production. UCP2 upregulation decreased superoxide whereas it increased hydrogen peroxide production with concomitant increase in the expression and activity of manganese superoxide dismutase (MnSOD), the primary mitochondrial antioxidant enzyme. Furthermore, hydrogen peroxide was responsible for induction of lipid peroxidation, and PLCγ-1 activation in UCP2 overexpressed cells (Sreedhard et al. 2017).
+
+Primary polyp of coral Acropora digitifera exposed to bacterial pathogen Vibrio coralliilyticus under thermal loading expresses genes involved in mitochondrial oxidative metabolism (Takagi et al. 2020)
+
+InterProScan Results: no protein family membership predicted
+Contains a mitochondrial carrier domain superfamily:
+
+GO Terms: none
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_HD$title_1 <- "Ucp2"
+
+HD_Ucp2 <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=Ucp2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Ucp2")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_1, )+
+  theme(strip.background = element_rect(fill = "#38b6ff"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+#### *cfap298*
+Q6DRC3: Cilia- and flagella-associated protein 298
+Plays a role in motile cilium function, possibly by acting on outer dynein arm assembly. Seems to be important for initiation rather than maintenance of cilium motility. Required for correct positioning of cilia at the apical cell surface, suggesting an additional role in the planar cell polarity (PCP) pathway. May suppress canonical Wnt signaling activity.
+
+The observed down-regulation of genes associated with cilia motility, i.e., growth arrest-specific protein 8 (GAS8), radial spoke head protein homologs 4a and 9 (Rsph4a and Rsph9) and cilia- and flagella-associated protein 69 (CFAP69), suggest a shutdown in feeding mechanisms of corals to divert resources to a stress response (Traylor-Knowles et al., 2017) (Poquita-Du et al. 2019)
+
+InterProScan results: cilia- and flagella-associated protein 298 protein family
+This entry includes a group of cilia- and flagella-associated protein, including Kur from zebrafish and C21orf59 from humans. Kur has been shown to play a dual role in cilia motility and polarization
+
+GO Terms: regulation of cilium movement
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_HD$title_2 <- "cfap298"
+
+HD_cfap298 <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=cfap298, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "cfap298")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+    facet_grid(. ~ title_2, )+
+  theme(strip.background = element_rect(fill = "#38b6ff"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+#### *Rab5a*
+M0RC99: Ras-related protein Rab-5A
+Small GTPase which cycles between active GTP-bound and inactive GDP-bound states. In its active state, binds to a variety of effector proteins to regulate cellular responses such as of intracellular membrane trafficking, from the formation of transport vesicles to their fusion with membranes. Active GTP-bound form is able to recruit to membranes different sets of downstream effectors directly responsible for vesicle formation, movement, tethering and fusion. RAB5A is required for the fusion of plasma membranes and early endosomes. Contributes to the regulation of filopodia extension. Required for the exosomal release of SDCBP, CD63, PDCD6IP and syndecan. Regulates maturation of apoptotic cell-containing phagosomes, probably downstream of DYN2 and PIK3C3.
+
+Immunofluorescence study showed that the majority of phagosomes containing either resident or newly internalized live zooxanthellae were labeled with ApRab5, while those containing either heat-killed r photosynthesis-impaired algae were mostly negative for ApRab5 staining whereas the opposite was observed for ApRab7. We propose that the active phagosomal retention of ApRab5 is part of the mechanisms employed by live zooxanthellae to: (1) persist inside their host cells and (2) exclude ApRab7 from their phagosomes, thereby, estabishing and/or maintaining an endosymbiotic relationship with their cnidarian hosts (Chen et al. 2004)
+
+Survival of live Salmonella in macrophages. Dead Salmonella-containing phagosomes acquire transferrin receptors (a marker for early endosomes), whereas by 30 min the dead bacteria are found in vesicles carrying the late endosomal markers cation-dependent mannose 6-phosphate recepors, Rab7 and Rab9. In contrast, live Salmonella-containing phagosomes (LSP) retain a significant amount of Rab5 and transferrin receptor until 30 min, selectively deplete Rab7 and Rab9, and never aquire mannose 6-phosphate receptors even 90 min after internalization. Retention of Rab5 and Rab18 and selective depletion of Rab7 and Rab9 presumably enable the LSP to avoid transport to lysosomes through late endosomes. The presence of immature cathepsin D (48 kDa) and selective depletion of the vacuolar ATPase in LSP presumably contributes to the less acidic pH of LSP. In contrast, proteolytically processed cathepsin D (M r17,000) was detected by 30 min on the deadSalmonella-containing phagosomes. Morphological analysis also revealed that after uptake by macrophages, the deadSalmonella are transported to lysosomes, whereas the live bacteria persist in compartments that avoid fusion with lysosomes, indicating that live Salmonella bypass the normal endocytic route targeted to lysosomes and mature in a specialized compartment. (Hashim et al. 2000)
+
+Mycobacterium tuberculosis and the closely related organism Mycobacterium bovis can survive and replicate inside macrophages. Intracellular survival is at least in part attributed to the failure of mycobacterial phagosomes to undergo fusion with lysosomes. The transformation of phagosomes into phagolysosomes involves gradual acquisition of markers from the endosomal compartment. Members of the rab family of small GTPases which confer fusion competence in the endocytic pathway are exchanged sequentially onto the phagosomal membranes in the course of their maturation. To identify the step at which the fusion capability of phagosomes containing mycobacteria is compromised, we purified green fluorescent protein-labeled M. bovis BCG phagosomal compartments (MPC) and compared GTP-binding protein profiles of these vesicles with latex bead phagosomal compartments (LBC). We report that the MPC do not acquire rab7, specific for late endosomes, even 7 days postinfection, whereas this GTP-binding protein is present on the LBC within hours after phagocytosis. By contrast, rab5 is retained and enriched with time on the MPC, suggesting fusion competence with an early endosomal compartment. Prior infection of macrophages withM. bovis BCG also affected the dynamics of rab5 and rab7 acquisition by subsequently formed LBC. Selective exclusion of rab7, coupled with the retention of rab5 on the mycobacterial phagosome, may allow organisms from the M. tuberculosis complex to avert the usual physiological destination of phagocytosed material. (Via et al. 1997)
+
+Same story in Listeria monocytogenes. (Alvarez-Dominguez et al. 1996). Anti-rab5 antibodies and immunodepletion of cytosolic rab5 inhibited fusion with lysosome
+
+InterProScan Results: Small GRPase
+Small GTPases form an independent superfamily within the larger class of regulatory GTP hydrolases. This superfamily contains proteins that control a vast number of important processes and possess a common, structurally preserved GTP-binding domain [1, 2]. Sequence comparisons of small G proteins from various species have revealed that they are conserved in primary structures at the level of 30-55% similarity [3].
+
+GO Terms: GTP binding, GTPase activity
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_HD$title_3 <- "Rab5a"
+
+HD_Rab5a <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=Rab5a, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Rab5a")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_3, )+
+  theme(strip.background = element_rect(fill = "#38b6ff"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+#### *fam166b*
+A9JS51: Ciliary microtubule inner protein 2B
+Microtubule inner protein (MIP) part of the dynein-decorated doublet microtubules (DMTs) in cilia axoneme, which is required for motile cilia beating.
+
+InterProScan Results: Ciliary microtubule inner protein 2A-C-like
+This entry represents a group of eukaryotic proteins, including human Ciliary microtubule inner protein 2A-C-like (CMI2A-C-like). CMI2B/C are microtubule inner proteins (MIPs) that form part of the dynein-decorated doublet microtubules (DMTs) in cilia axoneme, which is required for motile cilia beating [1].
+
+GO Terms: none
+
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_HD$title_4 <- "fam166b"
+
+HD_fam166b <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=fam166b, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "fam166b")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+    facet_grid(. ~ title_4, )+
+  theme(strip.background = element_rect(fill = "#38b6ff"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+#### adissp
+Q68FA2: Adipose-secreted signaling protein
+May be involved in thermogenesis and glucose homeostasis.
+
+InterProScan Results: Adipose-secreted signaling protein
+This family represents the adipocyte-secreted protein (adipokine) formerly known as UPF0687, that acts as a key regulator for white adipose tissue (WAT) thermogenesis and glucose homeostasis at least in part through activation of protein kinase A (PKA) [1]. This protein is adipose-specific, highly expressed in brown adipose tissue.
+
+GO Terms: none
+```{r, fig.height=3, fig.width=3.6}
+#HD_adissp <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=adissp, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "adissp")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+#### ACX2
+O65201: Acyl-coenzyme A oxidase 2, peroxisomal
+Catalyzes the desaturation of long-chain acyl-CoAs to 2-trans-enoyl-CoAs. Active on substrates longer than C14 and mostly with C18-CoA. Activity on long-chain mono-unsaturated substrates is double than with the corresponding saturated substrates.
+
+Acyl-CoA oxidase is the first enzyme in peroxisomal B-oxidation, which transfers the hydrogen to oxygen producing hydrogen peroxide instead of producing NADH2 (like in the mitochondria). The H2O2 is broken down to water by catalase.   
+
+InterProScan results: Acyl-CoA oxidase
+Acyl-CoA oxidase (ACO) acts on CoA derivatives of fatty acids with chain lengths from 8 to 18. It catalyses the first and rate-determining step of the peroxisomal beta-oxidation of fatty acids and a major producer of hydrogen peroxide (H2O2) [1, 2].
+
+Acyl-CoA oxidase is a homodimer and the polypeptide chain of the subunit is folded into the N-terminal alpha-domain, beta-domain, and C-terminal alpha-domain [1, 1]. Functional differences between the peroxisomal acyl-CoA oxidases and the mitochondrial acyl-CoA dehydrogenases are attributed to structural differences in the FAD environments [3].
+
+GO Terms: fatty acid beta-oxidation, fatty acid metabolic process, lipid homeostasis; oxidoreductase activity acting on the CH-CH group of donors, acyl-CoA oxidase activity, FAD binding, flavin adenin dinucleotide binding, fatty acid binding; peroxisome
+```{r, fig.height=3, fig.width=3.6}
+#HD_ACX2 <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=ACX2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "ACX2 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 10.9)
+```
+
+
+
+
+
+#### WDR97
+A6NE52: WD repeat-containing protein 97
+Unknown function
+
+InterProScan results: no protein family membership predicted
+Contains WD40-repeat-containing domain superfamily: WD-40 repeats (also known as WD or beta-transducin repeats) are short ~40 amino acid motifs, often terminating in a Trp-Asp (W-D) dipeptide. WD40 repeats usually assume a 7-8 bladed β-propeller fold, but proteins have been found with 4 to 16 repeated units, which also form a circularised β-propeller structure. WD-repeat proteins are a large family found in all eukaryotes and are implicated in a variety of functions ranging from signal transduction and transcription regulation to cell cycle control and apoptosis. Repeated WD40 motifs act as a site for protein-protein or protein-DNA interaction, and proteins containing WD40 repeats are known to serve as platforms for the assembly of protein complexes or mediators of transient interplay among other proteins [1]. The specificity of the proteins is determined by the sequences outside the repeats themselves. Examples of such complexes are G proteins (beta subunit is a β-propeller), TAFII transcription factor, and E3 ubiquitin ligase [2, 3]. In Arabidopsis spp., several WD40-containing proteins act as key regulators of plant-specific developmental events.
+
+GO Terms: protein binding
+```{r, fig.height=3, fig.width=3.6}
+#HD_WDR97 <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=WDR97, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "WDR97 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 8.8)
+```
+
+
+
+#### yuxK
+P40761: Uncharacterized protein YuxK
+Unknown function
+
+InterProScan results: DCC1-like thiol-disulfide oxidoreductase family
+Members of this family have two highly conserved cysteine residues within the DxxCxxC motif at the N-terminal. This motif is conserved in the thiol-disulfide oxidoreductase family [1]. This family includes At5g50100 (also known as DCC1) from Arabidopsis thaliana, a thioredoxin that modulates ROS homeostasis resulting in de novo shoot initiation and may be involved in the improvement of the capacity of plant regeneration [1]. Uncharacterised proteins from bacteria are also included in this family.
+
+GO Terms: protein-disulfide reductase activity
+```{r, fig.height=3, fig.width=3.6}
+#HD_yuxK <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=yuxK, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "yuxK Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 8.1)
+```
+
+
+#### *dnaJ*
+Q5FGQ8: Chaperone protein DnaJ
+Participates actively in the response to hyperosmotic and heat shock by preventing the aggregation of stress-denatured proteins and by disaggregating proteins, also in an autonomous, DnaK-independent fashion. Unfolded proteins bind initially to DnaJ; upon interaction with the DnaJ-bound protein, DnaK hydrolyzes its bound ATP, resulting in the formation of a stable complex. GrpE releases ADP from DnaK; ATP binding to DnaK triggers the release of the substrate protein, thus completing the reaction cycle. Several rounds of ATP-dependent interactions between DnaJ, DnaK and GrpE are required for fully efficient folding. Also involved, together with DnaK and GrpE, in the DNA replication of plasmids through activation of initiation proteins.
+
+
+Upregulated in juvenile Acropora millepora after acute and prolonged pCO2 exposure. HSP40/DNAJ and other small HSP proteins - sometimes referred to as 'holdases' - are the first line of the chaperone response to proteins in non-native conformations and are typically stress induced. (Moya et al. 2014)
+
+InterProScan results: no protein family membership detected
+Contains a:
+Ankyrin repeat: The ankyrin repeat is one of the most common protein-protein interaction motifs in nature. Ankyrin repeats are tandemly repeated modules of about 33 amino acids. They occur in a large number of functionally diverse proteins mainly from eukaryotes. The few known examples from prokaryotes and viruses may be the result of horizontal gene transfers. The repeat has been found in proteins of diverse function such as transcriptional initiators, cell-cycle regulators [1], cytoskeletal, ion transporters and signal transducers [2, 3]. The ankyrin fold appears to be defined by its structure rather than its function since there is no specific sequence or structure which is universally recognised by it.
+Chaperone J-domain superfamily: The hsp70 chaperone machine performs many diverse roles in the cell, including folding of nascent proteins, translocation of polypeptides across organelle membranes, coordinating responses to stress, and targeting selected proteins for degradation. DnaJ is a member of the hsp40 family of molecular chaperones, which is also called the J-protein family, the members of which regulate the activity of hsp70s. DnaJ (hsp40) binds to dnaK (hsp70) and stimulates its ATPase activity, generating the ADP-bound state of dnaK, which interacts stably with the polypeptide substrate [1, 2].
+SAP domain: The SAP motif is a 35-residue motif, which has been named after SAF-A/B, Acinus and PIAS, three proteins known to contain it. The SAP motif is found in a variety of nuclear proteins involved in transcription, DNA repair, RNA processing or apoptotic chromatin degradation. As the sap motif of SAF-A has been shown to be essential for specific DNA binding activity, it has been proposed that it could be a DNA-binding motif [1].
+
+
+GO Terms: protein binding
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_HD$title_5 <- "dnaJ"
+
+HD_dnaJ <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=dnaJ, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "dnaJ")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_5, )+
+  theme(strip.background = element_rect(fill = "#38b6ff"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+#### arhgap32
+Q6GPD0: Rho GTPase-activating protein 32
+GTPase-activating protein (GAP) promoting GTP hydrolysis on RHOA, CDC42 and RAC1 small GTPases.
+
+InterProScan results: no protein family membership predicted
+Contains:
+SH3-like domain superfamily: SH3 (src Homology-3) domains are small protein modules containing approximately 50 amino acid residues [1, 2]. They are found in a great variety of intracellular or membrane-associated proteins [3, 4, 5] for example, in a variety of proteins with enzymatic activity, in adaptor proteins, such as fodrin and yeast actin binding protein ABP-1.
+Rho GTPase activation protein: Proteins containing a RhoGAP (Rho GTPase Activating Protein) domain usually function to catalyse the hydrolysis of GTP that is bound to Rho, Rac and/or Cdc42, inactivating these regulators of the actin cytoskeleton. The 53 known human RhoGAP domain-containing proteins are the largest known group of Rho GTPase regulators and significantly outnumber the 21 Rho GTPases they presumably regulate. This excess of GAP proteins probably indicates complex regulation of the Rho GTPases and is consistent with the existence of almost as many (48) human Dbl domain-containing Rho GEFs that act antagonistically to the RhoGAP proteins by activating the Rho GTPases. Phylogenetic analysis offers evidence for frequent domain duplication and for duplication of the entire genes containing these GAP domains [1].
+
+
+GO Terms: signal trandsuction, protein binding, GTPase activator activity
+```{r, fig.height=3, fig.width=3.6}
+#HD_arhgap32 <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=arhgap32, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "arhgap32 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 11.4)
+```
+
+
+
+
+
+
+#### Cdh23
+Q99PF4: Cadherin-23,
+Cadherins are calcium-dependent cell adhesion proteins. They preferentially interact with themselves in a homophilic manner in connecting cells. CDH23 is required for establishing and/or maintaining the proper organization of the stereocilia bundle of hair cells in the cochlea and the vestibule during late embryonic/early postnatal development. It is part of the functional network formed by USH1C, USH1G, CDH23 and MYO7A that mediates mechanotransduction in cochlear hair cells. Required for normal hearing.
+
+InterProScan results: Cadherin
+Cadherins are a group of transmembrane proteins that serve as the major adhesion molecules located within adherens junctions. They can regulate cell-cell adhesion through their extracellular domain and their cytosolic domains connect to the actin cytoskeleton by binding to catenins [1]. These proteins preferentially interact with themselves in a homophilic manner in connecting cells; thus acting as both receptor and ligand. They may play an important role in the sorting of different cell types during morphogenesis, histogenesis and regeneration. They may also be involved in the regulation of tight and gap junctions, and in the control of intercellular spacing. Cadherins are evolutionary related to the desmogleins which are component of intercellular desmosome junctions involved in the interaction of plaque proteins.
+
+GO Terms: cell adhesion, homophilic cell adhesion via plasma membrane adhesion molecules, cell-cell adhesion, polysaccharide catabolic process; calcium ion binding, cadherin binding; plasma membrane, membrane, catenin complex
+```{r, fig.height=3, fig.width=3.6}
+#HD_Cdh23 <- 
+  ggplot(gene_expression_HD,
+         aes(x=Frag_Condition, y=Cdh23, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Cdh23 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 13.4)
+```
+
+
+#### Combined Figure
+```{r, fig.width=9.5, fig.height=3}
+pdf("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/selected_features_boxplots_colors.pdf",width = 9.5,height = 3)
+ggarrange(HD_Ucp2,
+          HD_Rab5a,
+          HD_cfap298,
+          HD_fam166b,
+          HD_dnaJ,
+          ncol = 5,nrow = 1,
+          common.legend = TRUE, legend = "bottom",
+          align = "hv"
+          )
+dev.off()
+```
+
+
+
+
+
+
+### LD
+
+The variable 'X' contains the gene expression data, and 'Y' contains the sample labels. 'X' is a two-dimensional matrix in which the row contains the sample names, and the column contains the gene/feature names. The variable 'Y' contains the sample labels as -1 and 1. 
+```{r}
+# Use expression data as the X matrix
+expression_data <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv", row.names = "Entry")
+X <- as.data.frame(t(expression_data))
+dim(X)
+# 22 17229
+
+# Use the class data (fragment condition) as the Y matrix
+# For this run we will do LD vs everything else, so adjust the "Frag_Condition" column where LD = 1 and everything else = -1
+metadata <- as.data.frame(read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv"))
+metadata <- metadata %>%
+  mutate(Frag_Condition = ifelse(Frag_Condition == "LD", 1, -1))
+
+Y <- metadata$Frag_Condition
+names(Y) <- metadata$Sample
+Y
+```
+
+```{r}
+system.time(sigfeatureRankedList <- sigFeature(X,Y))
+#     user   system  elapsed 
+# 2230.353   27.252 2264.466 
+
+save(X, Y, expression_data, metadata, sigfeatureRankedList, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigFeatureRankedList_LD.RData")
+```
+
+The variable "sigfeatureRankedList" will return the address of the genes/features after execution. To visualize the output, print the address of top 10 ranked genes/features. 
+```{r}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigFeatureRankedList_LD.RData")
+print(sigfeatureRankedList[1:10])
+# [1] 4684 14328  5150  8952  3734  3904 10975  9723 13712  2540
+
+# Identify the Entry IDs of the top 10 features using the above locations:
+expression_data <- tibble::rownames_to_column(expression_data, "Entry")
+expression_data[c(sigfeatureRankedList[1:10]),1]
+```
+
+Produce the model vector for training the dataset using the top 1000 genes/features. Linear kernel is chosen to get better performance.
+```{r}
+sigFeature.model=svm(X[ ,sigfeatureRankedList[1:1000]], Y, type = "C-classification",
+                     kernel = "linear")
+summary(sigFeature.model)
+```
+
+Show the prediction results of the same dataset that was trained before.
+```{r}
+pred <- predict(sigFeature.model, X[ ,sigfeatureRankedList[1:1000]])
+table(pred,Y)
+```
+
+The function svmrfeFeatureRanking() is included in this package to compare the performance with "sigFeature()"
+```{r}
+system.time(featureRankedList <- svmrfeFeatureRanking(X,Y))
+#     user   system  elapsed 
+# 2265.943   32.654 2318.587 
+save(X,Y, expression_data, metadata, sigfeatureRankedList, featureRankedList, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/LD/featureRankedList_LD.RData")
+```
+
+The top 10 features from svmrfe are printed below:
+```{r}
+print(featureRankedList[1:10])
+# [1] 8735 10048 16424  1076   707 15650   105  8670 14368 14475
+
+expression_data[c(featureRankedList[1:10]),1]
+```
+
+Produce the model vector for training the dataset using the top 1000 genes/features:
+```{r}
+RFE.model=svm(X[ ,featureRankedList[1:1000]], Y, 
+            type="C-classification", kernel="linear")
+summary(RFE.model)
+```
+
+The R script below shows the prediction result of the same dataset that was trained before.
+```{r}
+pred <- predict(RFE.model, X[ ,featureRankedList[1:1000]])
+table(pred,Y)
+```
+
+In this example section we will observe the p-value of the selected top 100 features. The function named "sigFeaturePvalue()" will calculate the p-value using t-statistic. The expression value will be taken from the dataset of the top 100 features.
+```{r, fig.width=8, fig.height=4}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/featureRankedList_LD.RData")
+pvalsigFe <- sigFeaturePvalue(X, Y, 100, sigfeatureRankedList)
+pvalRFE <- sigFeaturePvalue(X, Y, 100, featureRankedList)
+par(mfrow=c(1,2))
+hist(unlist(pvalsigFe), breaks = 50, col="skyblue", main=paste("sigFeature"), xlab = "p-value")
+hist(unlist(pvalRFE), breaks = 50, col="skyblue", main=paste("SVM-RFE"), xlab="p-value")
+```
+
+In this section a comparison of p-values produced by using the top 100 features (using "sigFeature" and "SVM-RFE" algorithms) is shown using scatter boxplots
+```{r, fig.width=6, fig.height=4}
+mytitle <- "Box Plot"
+par(mfrow=c(1,1))
+
+boxplot(unlist(pvalsigFe), unlist(pvalRFE), main=mytitle,
+        names=c("sigFeature","SVM-RFE"),
+        ylab="p-value", ylim=c(min(unlist(pvalsigFe)),
+                               max(unlist(pvalRFE))))
+stripchart(unlist(pvalsigFe), vertical = TRUE,
+           method = "jitter", add=TRUE, 
+           pch=16, col=c('green'))
+stripchart(unlist(pvalRFE), vertical = TRUE,
+           at=2, method = "jitter", add=TRUE,
+           pch=16, col=c('blue'))
+grid(nx=NULL, ny=NULL, col="black",lty="dotted")
+```
+
+For estimation of feature selection algorithms, Ambroise and McLachlan (2002) suggested external cross-validation, in which the feature selection and validation are performed on different parts of the sample set, to obtain an unbiased performance estimate. The stratified cross-validation (Brieman et al., 1984) is slightly different from regular cross-validation. In k-fold stratified cross-validation, a dataset is randomly partitioned into k equally sized folds such that the class distribution in each fold is approximately the same as that in the entire dataset. In contrast, regular cross-validation randomly partitions the dataset into k-folds without considering class distributions. Kohavi (1995) reported that stratified cross-validation has smaller bias and variance than regular cross-validation. The "sigFeature()" function thus further enhances by incorporating external cross-validation method. In this external k-fold cross validation procedure, k-1 folds are used for selecting the feature, and one fold remains untouched with will later use as a test sample set.
+```{r}
+results = sigFeature.enfold(X, Y, "kfold", 10)
+# takes about 12 hours to run
+
+str(results[1])
+
+save(X,Y,expression_data,metadata,sigfeatureRankedList,featureRankedList,pvalRFE, pvalsigFe,RFE.model,sigFeature.model, results, file="~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigfeatureEnfold_LD.RData")
+```
+
+In this section, a new function is introduced named "sigFeatureFrequency()". The main purpose of this function is to arrange the feature on the basis of its frequency. In the previous section the dataset is divided into k-folds, out of which k-1 folds are randomly taken and used for selecting the feature. This procedure is repeated k times and the frequency values are calculated for top 400 genes from the k number of lists. The "sigFeatureFrequency()" function is used here to rank further all the k'th feature lists according to its frequency.
+```{r}
+FeatureBasedonFrequency <- sigFeatureFrequency(X, results, 400, 400, pf=FALSE)
+str(FeatureBasedonFrequency)
+```
+
+In this section external cross-validation is computed and finally mean cross validation errors and the standard deviation of the errors is returned. The features, which are produced on the basis of frequnecy, are used for producing the mean cross-validation error. Training and test samples were initially split from the main sample set into k-folds. In each iteration k-1 fold are considered as training sample and remaining one fold is considered as testing sample. In this external cross-validation procedure, feature number is increased one by one. The number of miss-classification is averaged out for each fold change which finally is represented as error rate.
+```{r}
+inputdata <- data.frame(y=as.factor(Y), x=X)
+featsweepSigFe = lapply(1:400, sigCVError, FeatureBasedonFrequency, inputdata)
+# Takes multiple days to run
+
+str(featsweepSigFe[1])
+save(X,Y,expression_data,metadata,sigfeatureRankedList,featureRankedList,pvalRFE, pvalsigFe,RFE.model,sigFeature.model, results, FeatureBasedonFrequency, inputdata, featsweepSigFe, file="~/Documents/Dissertation/Mcav_Field/host/SVM/LD/featsweepSigFe_LD.RData")
+```
+
+In this section the "PlotErrors()" function draws two plots: the first plot represents the average external cross-validation error and the second plot represents the standard deviation of the miss-classification.
+```{r, fig.height=4, fig.width=6}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/featsweepSigFe_LD.RData")
+pdf(file = "~/Documents/Dissertation/Mcav_Field/host/SVM/LD/algorithm_figures/sigFe_CV_errors_raw.pdf", height = 4, width = 6)
+PlotErrors(featsweepSigFe, 0, 0.4)
+dev.off()
+# Change colors in illustrator
+```
+
+
+#### Gene Lists of Results
+```{r}
+load("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/featsweepSigFe_LD.RData")
+
+# Obtain pvalues for sigFeature ranked list
+pvalsigFe <- sigFeaturePvalue(X,Y,17229,sigfeatureRankedList)
+pvalsigFe_df <- as.data.frame(pvalsigFe)
+colnames(pvalsigFe_df) <- colnames(X[,sigfeatureRankedList[1:17229]])
+pvalsigFe_df <- as.data.frame(t(pvalsigFe_df))
+colnames(pvalsigFe_df) <- "pvalue"
+pvalsigFe_df <- tibble::rownames_to_column(pvalsigFe_df, "Entry")
+
+# annotate the significant features with Uniprot information
+annot <- read.csv("~/Documents/Dissertation/Mcav_Field/uniprotkb_AND_reviewed_true_2023_08_21.csv")
+pvalsigFe_df_annot <- as.data.frame(join(pvalsigFe_df,annot,by="Entry"))
+
+# annotate the sig features with Transcript ID
+mcav_annot <- as.data.frame(read.csv("~/Documents/Dissertation/Mcav_Field/host/salmon/mcav_tx2gene.csv"))
+require(data.table)
+setDT(mcav_annot); setDT(pvalsigFe_df_annot)
+pvalsigFe_df_annot_transcript <- mcav_annot[pvalsigFe_df_annot, mult = "first", on = "Entry", nomatch=0L]
+write.csv(pvalsigFe_df_annot_transcript, file = "~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigFE_ALL.csv", row.names = FALSE)
+
+# Identify number of features with significant t-statistic p-value
+pvalsigFe_df_annot_transcript_pvalue <- pvalsigFe_df_annot_transcript %>% filter(pvalue < 0.05)
+dim(pvalsigFe_df_annot_transcript_pvalue)
+# 5329
+```
+
+
+
+#### Functional Enrichment: Top 500 features
+##### Upregulated Significant Features
+Identify the significant LD features (pvalue < 0.05) and add LFC columns from DESeq2 to determine which features are upregulated relative to both HH and HD corals
+```{r}
+# Read in sigfeature data
+sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigFE_all.csv")
+
+# Isolate top 500 features
+sigFe_list_annot <- sigFe_list_annot[c(1:500),]
+
+# find directionality of gene expression between HH and LD corals
+LFC_HH_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_LD.csv")
+names(LFC_HH_v_LD)
+LFC_HH_v_LD <- LFC_HH_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_LD)[2] <- "LFC_HH_vs_LD"
+sigFe_list_merged <- join(sigFe_list_annot, LFC_HH_v_LD,by="Entry")
+names(sigFe_list_merged)
+
+# find features upregulated in LD corals relative to HH
+up_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD > 0) # 229 genes
+
+
+# find directionality of gene expression between HD and LD corals
+LFC_HD_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
+names(LFC_HD_v_LD)
+LFC_HD_v_LD <- LFC_HD_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HD_v_LD)[2] <- "LFC_HD_vs_LD"
+sigFe_list_merged <- join(sigFe_list_annot, LFC_HD_v_LD,by="Entry")
+names(sigFe_list_merged)
+
+# find features upregulated in LD corals relative to HD
+up_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD > 0) # 229 genes
+
+# find features upregulated in HH corals relative to both HD and LD corals
+names(up_sigFe_list_HH_vs_LD)
+up_sigFe_list_HH_vs_LD <- up_sigFe_list_HH_vs_LD[,c(1,9)]
+up_sigFe_list_HD_vs_LD <- up_sigFe_list_HD_vs_LD[,c(1,9)]
+merged <- join(up_sigFe_list_HH_vs_LD,up_sigFe_list_HD_vs_LD,by="Transcript") # 229 genes
+write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/LD/significant_features/top_500/up_sigFe_list_ALL.csv", row.names = FALSE)
+```
+
+##### Downregulated Significant Features
+Identify the significant HH features (pvalue < 0.05) and add LFC columns from DESeq2 to determine which features are downregulated relative to both HD and LD corals
+```{r}
+# Read in sigfeature data
+sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFE_all.csv")
+
+# Isolate top 500 features
+sigFe_list_annot <- sigFe_list_annot[c(1:500),]
+
+# find directionality of gene expression between HH and LD corals
+LFC_HH_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HH_vs_LD.csv")
+names(LFC_HH_v_LD)
+LFC_HH_v_LD <- LFC_HH_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HH_v_LD)[2] <- "LFC_HH_vs_LD"
+sigFe_list_merged <- join(sigFe_list_annot, LFC_HH_v_LD,by="Entry")
+names(sigFe_list_merged)
+
+# find features upregulated in LD corals relative to HH
+down_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD < 0) # 271 genes
+
+
+# find directionality of gene expression between HD and LD corals
+LFC_HD_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
+names(LFC_HD_v_LD)
+LFC_HD_v_LD <- LFC_HD_v_LD[,c(1,3)] # keep log2FoldChange
+colnames(LFC_HD_v_LD)[2] <- "LFC_HD_vs_LD"
+sigFe_list_merged <- join(sigFe_list_annot, LFC_HD_v_LD,by="Entry")
+names(sigFe_list_merged)
+
+# find features upregulated in LD corals relative to HD
+down_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD < 0) # 271 genes
+
+# find features upregulated in HH corals relative to both HD and LD corals
+names(up_sigFe_list_HH_vs_LD)
+down_sigFe_list_HH_vs_LD <- down_sigFe_list_HH_vs_LD[,c(1,9)]
+down_sigFe_list_HD_vs_LD <- down_sigFe_list_HD_vs_LD[,c(1,9)]
+merged <- join(down_sigFe_list_HH_vs_LD,down_sigFe_list_HD_vs_LD,by="Transcript") # 271 genes
+write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/LD/significant_features/top_500/down_sigFe_list_ALL.csv", row.names = FALSE)
+```
+
+##### Combined Enrichment
+Open "up_sigFe_list_ALL.csv" in Excel. Copy and paste the Transcript IDs into [STRING](https://version-12-0.string-db.org/cgi/input?sessionId=bNGEN7A34L5b&input_page_show_search=on) for functional enrichment using the M. cavernosa proteome (STRG0A38MOJ) as reference. To save the enrichments, scroll to the bottom of the "Analysis" tab and download *All enriched terms*. Save as "up_sigFe_list_ALL_enrichments.tsv".
+
+Open "down_sigFe_list_ALL.csv" in Excel. Copy and paste the Transcript IDs into [STRING](https://version-12-0.string-db.org/cgi/input?sessionId=bNGEN7A34L5b&input_page_show_search=on) for functional enrichment using the M. cavernosa proteome (STRG0A38MOJ) as reference. To save the enrichments, scroll to the bottom of the "Analysis" tab and download *All enriched terms*. Save as "down_sigFe_list_ALL_enrichments.tsv".
+
+Visualize the enrichments in bubble plots:
+```{r}
+LD_up_enrichment <- read.csv2("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/significant_features/top_500/up_sigFe_list_ALL_enrichments.tsv", header = TRUE, sep = "\t")
+names(LD_up_enrichment)
+
+# Make sure numeric data is recognized by R as numeric and add -log(padj) column
+LD_up_enrichment$LFC <- "up"
+LD_up_enrichment$false.discovery.rate <- as.numeric(LD_up_enrichment$false.discovery.rate)
+LD_up_enrichment$strength <- as.numeric(LD_up_enrichment$strength)
+LD_up_enrichment$logpadj <- -log(LD_up_enrichment$false.discovery.rate)
+LD_up_enrichment <- LD_up_enrichment[order(LD_up_enrichment$strength),]
+
+# Remove COMPARTMENTS, STRING clusters, and Uniprot Keywords enrichments
+LD_up_enrichment$X.category
+LD_up_enrichment <- subset(LD_up_enrichment, !X.category=="STRING clusters")
+LD_up_enrichment <- subset(LD_up_enrichment, !X.category=="COMPARTMENTS")
+LD_up_enrichment <- subset(LD_up_enrichment, !X.category=="UniProt Keywords")
+
+# Remove terms with strength < 1.2
+LD_up_enrichment_strength <- LD_up_enrichment %>% filter(strength >= 1.2)
+
+# Sort by descending -log(pvalue)
+LD_up_enrichment_strength <- LD_up_enrichment_strength[order(-LD_up_enrichment_strength$logpadj),]
+LD_up_enrichment_strength$term.description
+# Top 5 most interesting and non-redundant enrichments
+# [1] "PIP3 activates AKT signaling" 
+# [2] "Beta-catenin independent WNT signaling" 
+# [8] "Dectin-1 mediated noncanonical NF-kB signaling"  
+# [32] "C-type lectin receptors (CLRs)"  
+# [55] "Autophagosome maturation"  
+up_curated_enrichment <- LD_up_enrichment_strength[c(1,2,8,32,55),]
+
+
+LD_down_enrichment <- read.csv2("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/significant_features/top_500/down_sigFE_list_ALL_enrichments.tsv", header = TRUE, sep="\t")
+
+# Make sure numeric data is recognized by R as numeric and add -log(padj) column
+LD_down_enrichment$LFC <- "down"
+LD_down_enrichment$false.discovery.rate <- as.numeric(LD_down_enrichment$false.discovery.rate)
+LD_down_enrichment$strength <- as.numeric(LD_down_enrichment$strength)
+LD_down_enrichment$strength <- LD_down_enrichment$strength*-1 #convert strength to negative
+LD_down_enrichment$logpadj <- -log(LD_down_enrichment$false.discovery.rate)
+LD_down_enrichment <- LD_down_enrichment[order(LD_down_enrichment$strength),]
+
+# Remove COMPARTMENTS, STRING Clusters, and UniProt Keywords enrichments
+LD_down_enrichment$X.category
+LD_down_enrichment <- subset(LD_down_enrichment, !X.category=="STRING clusters")
+LD_down_enrichment <- subset(LD_down_enrichment, !X.category=="COMPARTMENTS")
+LD_down_enrichment <- subset(LD_down_enrichment, !X.category=="Uniprot Keywords")
+
+# Remove terms with strength >= -1.1
+LD_down_enrichment_strength <- LD_down_enrichment %>% filter(strength <= -1.1)
+
+# Sort by descending -log(pvalue)
+LD_down_enrichment_strength <- LD_down_enrichment_strength[order(-LD_down_enrichment_strength$logpadj),]
+LD_down_enrichment_strength$term.description
+# Top 5 most interesting and non-redundant enrichments
+# [1] "Collagen chain trimerization" 
+# [3] "Metalloexopeptidase activity"   
+# [4] "Chloride transmembrane transporter activity" 
+# [14] "Unsaturated fatty acid biosynthetic process"  
+# [16] "Nucleotide biosynthesis" 
+down_curated_enrichment <- LD_down_enrichment_strength[c(1,3,4,14,16),]
+
+# Prepare for plotting
+combined_enrichment <- rbind(up_curated_enrichment, down_curated_enrichment)
+combined_enrichment$new <- str_wrap(combined_enrichment$term.description, width = 26)
+combined_enrichment$LFC <- factor(combined_enrichment$LFC, levels = c("up","down"))
+
+# Plot in bubble plot
+LD_combined_enrichments <- 
+  ggplot(data = combined_enrichment, aes(x="",y=new,color=strength))+
+  geom_point(aes(size=logpadj))+
+  scale_color_gradientn(colors = c("#313695","#74add1","#ffffbf","#f46d43","#a50026"),
+                       limits = c(-2.6,2.6),
+                       breaks = c(-2,-1,0,2,2))+
+  scale_size_continuous(range = c(0,8), limits = c(0,30), breaks = c(10,20,30), name = "-log(FDR)")+
+  facet_wrap(~ LFC, nrow = 2, scales = "free_y")+
+  theme_light()+
+  labs(title = "HD Enrichment",y=NULL,x=NULL)+
+  theme(text = element_text(size=12), legend.position = "right",plot.title = element_text(size=13))
+```
+
+
+#### Heatmap: Top 15 Features
+Plot the relative expression of the top 15 HH features
+```{r}
+# Pull out the top 15 features
+pvalSigFe <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigFE_ALL.csv")
+pvalSigFe_top15 <- pvalSigFe[c(1:15),]
+
+# Read in rlog expression of those features
+rlogs <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv")
+keepGenes <- pvalSigFe_top15$Entry
+rlogs_keepGenes <- rlogs %>%
+  filter(Entry %in% keepGenes) %>%
+  arrange(match(Entry, keepGenes))
+names(pvalSigFe_top15)
+
+# Format the "Protein.names" column to remove occurrences of "(...)" also removing any leading space
+pvalSigFe_top15$Protein.ID <- gsub(" \\(.*","",as.character(pvalSigFe_top15$Protein.names))
+names(pvalSigFe_top15)
+geneNames <- pvalSigFe_top15[,c(2,9)] # keep "Entry" and "Protein.ID"
+rlogs_keepGenes <- join(rlogs_keepGenes, geneNames, by="Entry")
+
+# Load in metadata
+metadata <- read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv", row.names = "Sample")
+metadata <- as.data.frame(metadata)
+colnames(metadata)
+metadata <- metadata[,c(5,6)] # keep Colony_status and Frag_condition
+names(rlogs_keepGenes)
+mat <- rlogs_keepGenes[,-c(1)]
+mat <- tibble::column_to_rownames(mat,"Protein.ID")
+# warning: duplicate 'row.names' are not allowed
+# find offending duplicate 'row.names'
+subset(mat,duplicated(Protein.ID))
+# 9
+# 14
+names(mat)
+mat[9,23] <- "Collagen alpha-1(II) chain homolog"
+mat[14,23] <- "Collagen alpha-2(I) chain homolog"
+mat <- tibble::column_to_rownames(mat,"Protein.ID")
+
+
+# Modify ordering of the clusters using clustering callback option
+callback= function(hc, mat){
+  sv = svd(t(mat))$v[,1]
+  dend = reorder(as.dendrogram(hc), wts = sv)
+  as.hclust(dend)
+}
+
+breaksList = seq(-2.3, 2.3, by = 0.01)
+annot_colors=list(Frag_Condition=c(HH="#83dbaf",HD="#83cdf2",LD="#f99964"),Colony_status=c(Healthy="#F7c045",Diseased="#F759A6"))
+
+pdf(file = "~/Documents/Dissertation/Mcav_Field/host/SVM/LD/top15features_heatmap.pdf", width = 9, height = 6)
+pheatmap(mat,
+         scale = "row",
+         annotation_col = metadata,
+         clustering_callback = callback,
+         color = colorRampPalette(c("#053061","#2166ac","#4393c3","#92c5de","#d1e5f0","white","#fddbc7","#f4a582","#d6604d","#67001f"))(length(breaksList)),
+         annotation_colors = annot_colors,
+         breaks = breaksList,
+         legend = TRUE,
+         legend_labels = metadata,
+         cluster_cols = TRUE,
+         cluster_rows = TRUE,
+         fontsize_row = 9,
+         fontsize_col = 7,
+         cellwidth = 9,
+         cellheight = 12,
+         treeheight_col = 20,
+         treeheight_row = 15)
+dev.off()
+```
+
+
+#### Top Features Boxpot
+Research the top features on uniprot and choose 1-2 to plot in a boxplot
+
+```{r}
+# Prepare expression data
+LD_features <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigFE_ALL.csv")
+names(LD_features)
+top_15_LD_features <- LD_features[c(1:15),]
+
+# Load in gene expression for the features
+coral_expression <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/rlogs.csv")
+top_15_LD_features_expression <- join(top_15_LD_features,coral_expression,by="Entry")
+
+# format the "Gene.names" column to remove occurrences of "(...)" also removing any leading space
+top_15_LD_features_expression$Gene.ID <- gsub(" .*","",as.character(top_15_LD_features_expression$Gene.Names))
+names(top_15_LD_features_expression)
+gene_expression <- top_15_LD_features_expression[,c(9:31)] # keep rlogs and "Gene.ID"
+gene_expression$Gene.ID
+names(gene_expression)
+gene_expression[7,23] <- "col2a1_a"
+gene_expression[9,23] <- "col2a1_b"
+gene_expression[11,23] <- "GFPL"
+
+gene_expression <- tibble::column_to_rownames(gene_expression,"Gene.ID")
+gene_expression_LD <- as.data.frame(t(gene_expression))
+
+# load in metadata to get frag_condition column
+metadata <- read.csv("~/Documents/Dissertation/Mcav_Field/mcav_metaData.csv")
+names(metadata)
+gene_expression_LD$Frag_Condition <- metadata$Frag_Condition
+names(gene_expression_LD)
+
+# Plot boxplots by Frag_condition
+gene_expression_LD$Frag_Condition <- factor(gene_expression_LD$Frag_Condition, levels = c("HH","HD","LD"))
+names(gene_expression_LD)
+```
+
+#### *TPM1 - top feature*
+P41114: Tropomyosin-1
+
+Tropomyosin-1 of P. carnea (hydro) is a non-muscle isoform and is expressed in all tissues. (Groger et al. 1999). There is another cnidarian tropomyosin, trop1, described in the freshwater hydrozoan Hydra magnipapillata present as a cytoskeletal component in epithelial cells of the tentacle and appears to be used to anchor nematocytes (Lopez de Haro et al. 1994). 
+
+Found to be associated with adult alga-hosting cells in Stylophora pistillata (Levy et al. 2021). 
+
+Nonmuscle tropomyosin isoforms are involved in a range of cellular pathways that control and regulate the cell's cytoskeleton and other key cellular functions. 
+
+TM1, TM2, and TM3 significnatly downregulated in cell line of squamous cell carcinoma of esophagus (SCCE). mRNA level of TMP1 and TPM2 were markedly decreased in tumor cell line relative to esophagus normal epithelial cells. Therefore downregulation of TMs could play an important tole in tumorigenesis of esophageal cancer. (Zare et al. 2011)
+
+Decreased expression of specific nonmuscle Tm isoforms is commonly associated with the transformed phenotype (of cancer). These changes in Tm expression appear to contribute to the rearrangement of microfilament bundles and morphological alterations increased cell motility and oncogenic signaling properties of transformed cells. 
+
+InterProScan results: tropomyosin
+Tropomyosins [1], are a family of closely related proteins present in muscle and non-muscle cells. In striated muscle, tropomyosin mediate the interactions between the troponin complex and actin so as to regulate muscle contraction [2]. The role of tropomyosin in smooth muscle and non-muscle tissues is not clear. Tropomyosin is an α-helical protein that forms a coiled-coil structure of 2 parallel helices containing 2 sets of 7 alternating actin binding sites [3]. There are multiple cell-specific isoforms, created by differential splicing of the messenger RNA from one gene, but the proportions of the isoforms vary between different cell types. Muscle isoforms of tropomyosin are characterised by having 284 amino acid residues and a highly conserved N-terminal region, whereas non-muscle forms are generally smaller and are heterogeneous in their N-terminal region.
+
+GO Terms: actin filament organization, muscle contraction; actin filament binding; actin filament
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+gene_expression_LD$title_1 <- "TPM1"
+
+LD_TPM1 <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=TPM1, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "TPM1")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_1, )+
+  theme(strip.background = element_rect(fill = "#ffbd59"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+#### CPXM1
+Q96SM3: Probable carboxypeptidase X1
+May be involved in cell-cell interactions. No carboxypeptidase activity was found yet (By similarity).
+
+InterProScan results: no protein family membership predicted
+Coagulation factor 5/8 C-terminal domain
+Galactose-binding-like domain superfamily
+
+GO Terms: none
+
+```{r, fig.height=3, fig.width=3.6}
+compare_means(CPXM1 ~ Frag_Condition,data=gene_expression_LD)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_CPXM1 <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=CPXM1, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "CPXM1 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 8.2)
+```
+
+
+
+#### crt
+P52046: Short-chain-enoyl-CoA hydratase
+
+Catalyzes the reversible hydration of crotonyl-CoA. Can also use hexenoyl-CoA but not higher analogs.
+
+Functions in the second step of the mitochondrial fatty acid beta-oxidation pathway. It catalyzes the hydration of 2-trans-enoyl-coenzyme A (CoA) intermediates to L-3-hydroxyacyl-CoAs. It localizes to the mitochondrial matrix. 
+
+InterProScan results: Enoyl-CoA hydratase/isomerase
+This family contains a diverse set of enzymes from cellular organisms, including: fatty acid oxidation complex subunit alpha, enoyl-CoA hydratase, 1,4-dihydroxy-2-naphthoyl-CoA synthase (napthoate synthase), carnitinyl-CoA dehydratase (carnitine racemase), 3-hydroxybutyryl-CoA dehydratase and enoyl-CoA delta isomerase (dodecanoyl-CoA delta-isomerase).
+
+GO terms: fatty acid beta-oxidation; catalytic activity, enoyl-CoA hydratase activity
+
+```{r, fig.height=3, fig.width=3.6}
+compare_means(crt ~ Frag_Condition,data=gene_expression_LD)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_crt <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=crt, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "crt Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 8.1)
+```
+
+
+
+
+#### MYL9_a
+Q5E9E2: Myosin regulatory light polypeptide 9
+Myosin regulatory subunit that plays an important role in regulation of both smooth muscle and nonmuscle cell contractile activity via its phosphorylation. Implicated in cytokinesis, receptor capping, and cell locomotion (By similarity).
+In myoblasts, may regulate PIEZO1-dependent cortical actomyosin assembly involved in myotube formation (By similarity).
+
+Myosin light chain expressed in adult gastro muscle cells. 
+
+InterProScan results: no protein family membership predicted
+Contains an EF hand domain
+
+GO Terms: calcium ion binding, myosin heavy chain binding; cytoplasm, myosin II complex
+```{r, fig.height=3, fig.width=3.6}
+compare_means(MYL9 ~ Frag_Condition,data=gene_expression_LD)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_MYL9 <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=MYL9, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "MYL9 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 11.6)
+```
+
+
+#### Mp20
+P14318: Muscle-specific protein 20
+
+InterProScan results: Smooth muscle protein/calponin
+Calponin is a smooth muscle-specific, actin-, tropomyosin- and calmodulin-binding protein believed to be involved in regulation or modulation of contraction [1]; interaction of the protein with actin inhibits actomyosin MgATPase activity. Multiple isoforms are found in smooth muscle [2]. Calponin is a basic protein of ~34 Kd [3]. The protein contains three repeats of a well-conserved 26-residue domain (see IPR000557).
+
+GO terms: protein binding
+```{r, fig.height=3, fig.width=3.6}
+compare_means(Mp20 ~ Frag_Condition,data=gene_expression_LD)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_Mp20 <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=Mp20, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Mp20 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 12.9)
+```
+
+
+#### TPM2
+P19352: Tropomyosin beta chain
+Binds to actin filaments in muscle and non-muscle cells. Plays a central role, in association with the troponin complex, in the calcium dependent regulation of vertebrate striated muscle contraction. Smooth muscle contraction is regulated by interaction with caldesmon. In non-muscle cells is implicated in stabilizing cytoskeleton actin filaments.
+
+TPM4 was significantly downregulated in the SCTLD experiment. 
+
+Tpm2 is expressed solely in the striated muscle of the developing and adult medusa life cycle stages and not in the polyp of Hydractinia? (Sanders et al. 2014)
+
+InterProScan results: Tropomyosin
+
+GO Terms: actin filament organization, muscle contraction; actin filament binding; actin filament
+
+```{r, fig.height=3, fig.width=3.6}
+compare_means(TPM2 ~ Frag_Condition,data=gene_expression_LD)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_TPM2 <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=TPM2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "TPM2 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 12.4)
+```
+
+
+
+#### *col2a1_a*
+Q6P4Z2: Collagen alpha-1(II) chain
+Type II collagen is specific for cartilaginous tissues. It is essential for the normal embryonic development of the skeleton, for linear growth and for the ability of cartilage to resist compressive forces (By similarity).
+
+Signifiant downregulation in heat-stressed Acropora palmata (DeSalvo et al. 2010). Also downregulated in M. cavernosa experimentally exposed to SCTLD (Traylor-Knowles et al. 2021)
+
+Collagen biosynthesis was broadly under the control of the gastroderm. The mesoglea, the acellular layer between epidermis and gastroderm, which mostly consists of collagen, may particially originate from the gastroderm in A. viridis. However, none of these genes showed differential expression between symbiotic and aposymbiotic states, except for Prolyl-4-hydroxylase alpha (a key chaperone for the biosynthesis of collagen). Infer that Symbiodinium may exert, directly or indirectly, post-translational control on collagen synthesis and modulate the formation of the mesoglea in A. viridis (Ganot et al. 2011)
+
+InterProScan results: no protein family membership predicted
+Fibrillar collagen, C-terminal: This entry represents the C-terminal non-collagenous domain of animal fibrillar collagens, also named C-propeptide, which is highly conserved from invertebrates to vertebrates (types I-III, V, XI, XXIV and XXVII) [1, 2, 3, 4]. This domain is involved in both intracellular molecular assembly and extracellular formation of collagen fibrils [5, 6]. It is found associated with triple helical repeats
+Collagen triple helix repeat: Collagens are generally extracellular structural proteins involved in formation of connective tissue structure. The sequence is predominantly repeats of the G-X-Y and the polypeptide chains form a triple helix. The first position of the repeat is glycine, the second and third positions can be any residue but are frequently proline and hydroxyproline. Collagens are post-translationally modified by proline hydroxylase to form the hydroxyproline residues. Defective hydroxylation is the cause of scurvy [1, 2, 3].
+Members of this family belong to the collagen superfamily [4]. Some of them are not involved in connective tissue structure but share the same triple helical structure.
+
+GO Terms: extracellular matrix structural constituent
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_LD$title_2 <- "col2a1_a"
+
+LD_col2a1_a <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=col2a1_a, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "col2a1_a")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_2, )+
+  theme(strip.background = element_rect(fill = "#ffbd59"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+#### Tagln2
+Q5XFX0: Transgelin-2
+Specific function not yet determined, thought to be a tumor supressor. 
+
+InterProScan results: smooth muscle protein/calponin
+Calponin is a smooth muscle-specific, actin-, tropomyosin- and calmodulin-binding protein believed to be involved in regulation or modulation of contraction [1]; interaction of the protein with actin inhibits actomyosin MgATPase activity. Multiple isoforms are found in smooth muscle [2]. Calponin is a basic protein of ~34 Kd [3]. The protein contains three repeats of a well-conserved 26-residue domain (see IPR000557).
+
+GO Terms: protein binding
+```{r, fig.height=3, fig.width=3.6}
+compare_means(Tagln2 ~ Frag_Condition,data=gene_expression_LD)
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+#HH_Tagln2 <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=Tagln2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "Tagln2 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)+
+  stat_compare_means(label.x = 1.1, label.y = 14.1)
+```
+
+
+#### col2a1_b
+Q5FGQ8: Collagen alpha-1(II) chain
+Type II collagen is specific for cartilaginous tissues. It is essential for the normal embryonic development of the skeleton, for linear growth and for the ability of cartilage to resist compressive forces (By similarity).
+
+See comments on col2a1_a
+
+Interpro Scan results: no protein family membership predicted
+Fibrillar collagen, C-terminal
+von Willebrand factor A-like domain superfamily
+Collagen triple helix repeat
+
+GO Terms: extracellular matrix structural consitituent
+```{r, fig.height=2.5, fig.width=3.2}
+my_comparisons <- list(c("HH","HD"),c("HH","LD"),c("HD","LD"))
+
+LD_col2a1_b <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=col2a1_b, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "col2a1_b")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.1)))+
+  theme_light()+
+  stat_compare_means(comparisons = my_comparisons)
+  #stat_compare_means(label.x = 1.1, label.y = 18.6)
+```
+
+
+
+#### *COL1A2*
+O46392: Collagen alpha-2(I) chain
+
+Downregulated in 5 species of coral experimentally exposed to SCTLD (Beavers et al. 2023)
+
+Interpro scan results: no protein family membership predicted
+
+GO Terms: extracellular matrix structural constituent
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_LD$title_3 <- "COL1A2"
+
+LD_COL1A2 <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=COL1A2, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "COL1A2 Expression")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_3, )+
+  theme(strip.background = element_rect(fill = "#ffbd59"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+#### *GFPL*
+Q9U6Y3: GFP-like fluorescent chromoprotein cFP484
+Pigment protein that is green in color. 
+
+Fluorescent proteins have become a useful and ubiquitous tool for making chimeric proteins, where they function as a fluorescent protein tag. Typically they tolerate N- and C-terminal fusion to a broad variety of proteins. They have been expressed in most known cell types and are used as a noninvasive fluorescent marker in living cells and organisms. They enable a wide range of applications where they have functioned as a cell lineage tracer, reporter of gene expression, or as a measure of protein-protein interactions.
+
+InterProScan results: Green fluorescent protein-related
+he green fluorescent protein (GFP) is found in the jellyfish (Aequorea victoria), and functions as an energy-transfer acceptor. It fluorescesin vivoupon receiving energy from the Ca2+-activated photoprotein aequorin. The protein absorbs light maximally at 395 nm and exhibits a smaller absorbance peak at 470 nm. The fluorescence emission spectrum peaks at 509 nm with a shoulder at 540 nm. The protein is produced in the photocytes and contains a chromophore, which is composed of modified amino acid residues. The chromophore is formed upon cyclisation of the residues ser-dehydrotyr-gly. There are several other members of the GFP family, which are able to fluoresce different colours, several of which are non-fluorescent [1]. These proteins are all essentially encoded by single genes, since both the substrate and the catalytic enzyme for pigment biosynthesis are provided within a single polypeptide chain [2].
+
+GO Terms: bioluminescence
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_LD$title_4 <- "GFPL"
+
+LD_GFPL <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=GFPL, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "GFPL")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_4, )+
+  theme(strip.background = element_rect(fill = "#ffbd59"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+
+
+
+#### *sodA*
+Q55GQ5: Superoxide dismutase [Cu-Zn] 1
+
+Destroys radicals which are normally produced within the cells and which are toxic to biological systems.
+
+Interpro scan results: no protein family membership detected
+SOD-like Cu/Zn domain superfamily
+
+GO Terms: superoxide metabolic process; metal ion binding
+```{r, fig.height=2.5, fig.width=3.2}
+gene_expression_LD$title_5 <- "sodA"
+
+LD_sodA <- 
+  ggplot(gene_expression_LD,
+         aes(x=Frag_Condition, y=sodA, fill=Frag_Condition))+
+  geom_point(aes(color=Frag_Condition), position = position_dodge(width = 0.47), size = 1.5, alpha = 2, show.legend = FALSE)+
+  geom_boxplot(width = 0.5, outlier.shape = NA, alpha = 0.5)+
+  labs(y=NULL, x=NULL, fill = "Disease State", title = "sodA")+
+  scale_color_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_fill_manual(values = c("#56BD8B","#69B6E5","#F37224"))+
+  scale_y_continuous(expand = expansion(mult = c(0.05,0.2)))+
+  theme_light()+
+  facet_grid(. ~ title_5, )+
+  theme(strip.background = element_rect(fill = "#ffbd59"), strip.text = element_text(color="black", size = 14))+
+  labs(title = NULL)+
+  stat_compare_means(comparisons = my_comparisons)
+```
+
+#### Combined Figure
+```{r, fig.width=9.5, fig.height=2.9}
+pdf("~/OneDrive - University of Texas at Arlington/Dissertation/Mcav_Field/host/SVM/LD/selected_features_boxplots_colors.pdf",width = 9.5,height = 3)
+ggarrange(LD_TPM1,
+          LD_col2a1_a,
+          LD_COL1A2,
+          LD_GFPL,
+          LD_sodA,
+          ncol = 5,nrow = 1,
+          common.legend = TRUE, legend = "bottom", align = "hv"
+          )
+dev.off()
+```
+
+## Combined Enrichments Plot
+
+```{r, fig.height=6, fig.width=8.3}
+pdf(file = "~/Documents/Dissertation/Mcav_Field/Submission_Data/host_combined_enrichments.pdf",height = 6, width = 8)
+ggarrange(HH_combined_enrichments,
+          HD_combined_enrichments,
+          LD_combined_enrichments,
+          ncol = 3, nrow = 1,
+          common.legend = TRUE, legend = "right", align = "hv")
+dev.off()
+```
+
