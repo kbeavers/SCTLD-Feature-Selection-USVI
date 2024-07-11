@@ -513,8 +513,8 @@ colnames(LFC_HH_v_LD)[2] <- "LFC_HH_vs_LD"
 sigFe_list_merged <- merge(sigFe_list_annot,LFC_HH_v_LD, by="Entry")
 
 # Find features upregulated in HH corals relative to LD
-up_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD < 0) # 369 genes
-
+up_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD < 0) 
+dim(up_sigFe_list_HH_vs_LD) # 369 genes
 
 
 # Find directionality of gene expression between HH and HD corals
@@ -526,13 +526,14 @@ sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD, by="Entry")
 
 # Find features upregulated in HH corals relative to HD
 up_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD < 0) # 370 genes
-
+dim(up_sigFe_list_HH_vs_HD) # 370 genes
 
 # Find features upregulated in HH corals relative to both HD and LD corals
 names(up_sigFe_list_HH_vs_HD)
 up_sigFe_list_HH_vs_HD <- up_sigFe_list_HH_vs_HD[,c(2,9)]
 up_sigFe_list_HH_vs_LD <- up_sigFe_list_HH_vs_LD[,c(2,9)]
-merged <- merge(up_sigFe_list_HH_vs_HD, up_sigFe_list_HH_vs_LD, by="Transcript") # 369 genes
+merged <- merge(up_sigFe_list_HH_vs_HD, up_sigFe_list_HH_vs_LD, by="Transcript") 
+dim(merged) # 369 genes
 write.csv(merged,"~/Documents/Dissertation/Mcav_Field/host/SVM/HH/significant_features/top_500/up_sigFe_list_ALL.csv", row.names = FALSE)
 ```
 
@@ -553,8 +554,8 @@ colnames(LFC_HH_v_LD)[2] <- "LFC_HH_vs_LD"
 sigFe_list_merged <- merge(sigFe_list_annot,LFC_HH_v_LD, by="Entry")
 
 # Find features downregulated in HH corals relative to LD
-down_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD > 0) # 131 genes
-
+down_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD > 0) 
+dim(down_sigFe_list_HH_vs_LD) # 131 genes
 
 
 # Find directionality of gene expression between HH and HD corals
@@ -566,13 +567,14 @@ sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD, by="Entry")
 
 # Find features downregulated in HH corals relative to HD
 down_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD > 0) # 130 genes
-
+dim(down_sigFe_list_HH_vs_HD) # 130 genes
 
 # Find features upregulated in HH corals relative to both HD and LD corals
 names(down_sigFe_list_HH_vs_HD)
 down_sigFe_list_HH_vs_LD <- down_sigFe_list_HH_vs_LD[,c(2,9)]
 down_sigFe_list_HH_vs_HD <- down_sigFe_list_HH_vs_HD[,c(2,9)]
-merged <- merge(down_sigFe_list_HH_vs_LD, down_sigFe_list_HH_vs_HD, by="Transcript") # 130 genes
+merged <- merge(down_sigFe_list_HH_vs_LD, down_sigFe_list_HH_vs_HD, by="Transcript") 
+dim(merged) # 130 genes
 write.csv(merged,"~/Documents/Dissertation/Mcav_Field/host/SVM/HH/significant_features/top_500/down_sigFe_list_ALL.csv", row.names = FALSE)
 ```
 
@@ -1355,8 +1357,8 @@ colnames(LFC_HD_v_LD)[2] <- "LFC_HD_vs_LD"
 sigFe_list_merged <- merge(sigFe_list_annot,LFC_HD_v_LD, by="Entry")
 
 # Find features upregulated in HD corals relative to LD
-up_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD < 0) # 202 genes
-
+up_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD < 0) 
+dim(up_sigFe_list_HD_vs_LD) # 202 genes
 
 
 # Find directionality of gene expression between HH and HD corals
@@ -1368,14 +1370,16 @@ sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD,by="Entry")
 names(sigFe_list_merged)
 
 # Find features upregulated in HD corals relative to HH
-up_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD > 0) # 203 genes
+up_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD > 0) 
+dim(up_sigFe_list_HH_vs_HD) # 203 genes
 
 # Find features upregulated in HD corals relative to both HH and LD corals
 names(up_sigFe_list_HD_vs_LD)
 up_sigFe_list_HD_vs_LD <- up_sigFe_list_HD_vs_LD[,c(2,9)]
 up_sigFe_list_HH_vs_HD <- up_sigFe_list_HH_vs_HD[,c(2,9)]
-merged <- merge(up_sigFe_list_HD_vs_LD,up_sigFe_list_HH_vs_HD,by="Transcript") # 202 genes
-write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/HD/significant_features/top_500/up_sigFe_list_ALL.csv", row.names = FALSE)
+merged <- merge(up_sigFe_list_HD_vs_LD,up_sigFe_list_HH_vs_HD,by="Transcript") 
+dim(merged) # 202 genes
+write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/symbiont/SVM/HD/significant_features/top_500/up_sigFe_list_ALL.csv", row.names = FALSE)
 ```
 
 ##### Downregulated Significant Features
@@ -1389,14 +1393,14 @@ sigFe_list_annot <- sigFe_list_annot[c(1:500),]
 
 # Find directionality of gene expression between HD and LD corals
 LFC_HD_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
-names(LFC_HH_v_LD)
+names(LFC_HD_v_LD)
 LFC_HD_v_LD <- LFC_HD_v_LD[,c(1,3)] # keep log2FoldChange
 colnames(LFC_HD_v_LD)[2] <- "LFC_HD_vs_LD"
 sigFe_list_merged <- merge(sigFe_list_annot,LFC_HD_v_LD, by="Entry")
 
 # Find features downregulated in HD corals relative to LD
-down_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD > 0) # 298 genes
-
+down_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD > 0) 
+dim(down_sigFe_list_HD_vs_LD) # 298 genes
 
 
 # Find directionality of gene expression between HH and HD corals
@@ -1408,14 +1412,15 @@ sigFe_list_merged <- merge(sigFe_list_annot, LFC_HH_v_HD,by="Entry")
 names(sigFe_list_merged)
 
 # find features downregulated in HD corals relative to HH
-down_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD < 0) # 297 genes
-
+down_sigFe_list_HH_vs_HD <- sigFe_list_merged %>% filter(LFC_HH_vs_HD < 0) 
+dim(down_sigFe_list_HH_vs_HD) # 297 genes
 
 # find features downregulated in HD corals relative to both HH and LD corals
 names(down_sigFe_list_HD_vs_LD)
 down_sigFe_list_HD_vs_LD <- down_sigFe_list_HD_vs_LD[,c(2,9)]
 down_sigFe_list_HH_vs_HD <- down_sigFe_list_HH_vs_HD[,c(2,9)]
-merged <- merge(down_sigFe_list_HD_vs_LD,down_sigFe_list_HH_vs_HD,by="Transcript") # 297 genes
+merged <- merge(down_sigFe_list_HD_vs_LD,down_sigFe_list_HH_vs_HD,by="Transcript") 
+dim(merged) # 297 genes
 write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/HD/significant_features/top_500/down_sigFe_list_ALL.csv", row.names = FALSE)
 ```
 
@@ -2140,8 +2145,8 @@ sigFe_list_merged <- join(sigFe_list_annot, LFC_HH_v_LD,by="Entry")
 names(sigFe_list_merged)
 
 # find features upregulated in LD corals relative to HH
-up_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD > 0) # 229 genes
-
+up_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD > 0) 
+dim(up_sigFe_list_HH_vs_LD) # 229 genes
 
 # find directionality of gene expression between HD and LD corals
 LFC_HD_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
@@ -2153,12 +2158,14 @@ names(sigFe_list_merged)
 
 # find features upregulated in LD corals relative to HD
 up_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD > 0) # 229 genes
+dim(up_sigFe_list_HD_vs_LD) # 229 genes
 
 # find features upregulated in HH corals relative to both HD and LD corals
 names(up_sigFe_list_HH_vs_LD)
 up_sigFe_list_HH_vs_LD <- up_sigFe_list_HH_vs_LD[,c(1,9)]
 up_sigFe_list_HD_vs_LD <- up_sigFe_list_HD_vs_LD[,c(1,9)]
-merged <- join(up_sigFe_list_HH_vs_LD,up_sigFe_list_HD_vs_LD,by="Transcript") # 229 genes
+merged <- join(up_sigFe_list_HH_vs_LD,up_sigFe_list_HD_vs_LD,by="Transcript") 
+dim(merged) #229 genes
 write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/LD/significant_features/top_500/up_sigFe_list_ALL.csv", row.names = FALSE)
 ```
 
@@ -2166,7 +2173,7 @@ write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/LD/significa
 Identify the significant HH features (pvalue < 0.05) and add LFC columns from DESeq2 to determine which features are downregulated relative to both HD and LD corals
 ```{r}
 # Read in sigfeature data
-sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/HD/sigFE_all.csv")
+sigFe_list_annot <- read.csv("~/Documents/Dissertation/Mcav_Field/host/SVM/LD/sigFE_all.csv")
 
 # Isolate top 500 features
 sigFe_list_annot <- sigFe_list_annot[c(1:500),]
@@ -2181,7 +2188,7 @@ names(sigFe_list_merged)
 
 # find features upregulated in LD corals relative to HH
 down_sigFe_list_HH_vs_LD <- sigFe_list_merged %>% filter(LFC_HH_vs_LD < 0) # 271 genes
-
+dim(down_sigFe_list_HH_vs_LD) # 271 genes
 
 # find directionality of gene expression between HD and LD corals
 LFC_HD_v_LD <- read.csv("~/Documents/Dissertation/Mcav_Field/host/DESeq2/resordered_HD_vs_LD.csv")
@@ -2193,12 +2200,14 @@ names(sigFe_list_merged)
 
 # find features upregulated in LD corals relative to HD
 down_sigFe_list_HD_vs_LD <- sigFe_list_merged %>% filter(LFC_HD_vs_LD < 0) # 271 genes
+dim(down_sigFe_list_HD_vs_LD) # 271 genes
 
 # find features upregulated in HH corals relative to both HD and LD corals
 names(up_sigFe_list_HH_vs_LD)
 down_sigFe_list_HH_vs_LD <- down_sigFe_list_HH_vs_LD[,c(1,9)]
 down_sigFe_list_HD_vs_LD <- down_sigFe_list_HD_vs_LD[,c(1,9)]
-merged <- join(down_sigFe_list_HH_vs_LD,down_sigFe_list_HD_vs_LD,by="Transcript") # 271 genes
+merged <- join(down_sigFe_list_HH_vs_LD,down_sigFe_list_HD_vs_LD,by="Transcript") 
+dim(merged) # 271 genes
 write.csv(merged,file="~/Documents/Dissertation/Mcav_Field/host/SVM/LD/significant_features/top_500/down_sigFe_list_ALL.csv", row.names = FALSE)
 ```
 
