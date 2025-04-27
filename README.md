@@ -6,6 +6,10 @@ This repository contains the code and supporting files for characterizing gene e
 
 This repository contains an end-to-end workflow for analyzing RNA-seq data from healthy and SCTLD-affected corals (*Montastraea cavernosa*) and their dominant algal symbiont (Genus: *Cladocopium*).
 
+## Data Availability
+
+The raw sequencing data from this study is available in the NCBI BioProject database under accession number [PRJNA1062758](https://www.ncbi.nlm.nih.gov/bioproject/PRJNA1062758/).
+
 ### Key Files
 
 #### Command Line Processing
